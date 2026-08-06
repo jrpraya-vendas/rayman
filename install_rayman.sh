@@ -1722,6 +1722,88 @@ def perguntar(pergunta):
     return resposta
 
 
+def autorizar(args):
+    """Fluxo OAuth completo: navegador -> autoriza -> tokens salvos."""
+    import base64
+    import http.server
+    import secrets
+    import subprocess
+    import threading
+    import urllib.parse
+
+    import httpx
+
+    cred = _ler()
+    client_id = args[0] if len(args) > 0 else cred.get("client_id", "")
+    client_secret = args[1] if len(args) > 1 else cred.get("client_secret", "")
+    if not client_id or not client_secret:
+        print("Uso: rayman-bling --autorizar CLIENT_ID CLIENT_SECRET")
+        print("(ou rode --config antes, que eu reaproveito o client salvo)")
+        sys.exit(1)
+
+    porta = 8799
+    estado_oauth = secrets.token_urlsafe(16)
+    resultado = {}
+
+    class Callback(http.server.BaseHTTPRequestHandler):
+        def log_message(self, *a):
+            pass
+
+        def do_GET(self):
+            q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+            corpo = "<h2>Pode fechar esta aba. RAYMAN autorizado no Bling.</h2>"
+            if q.get("code") and q.get("state", [""])[0] == estado_oauth:
+                resultado["code"] = q["code"][0]
+            else:
+                corpo = "<h2>Autorização não veio completa — tente de novo.</h2>"
+            dados = corpo.encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(dados)))
+            self.end_headers()
+            self.wfile.write(dados)
+
+    servidor = http.server.HTTPServer(("127.0.0.1", porta), Callback)
+    threading.Thread(target=servidor.serve_forever, daemon=True).start()
+
+    url = ("https://www.bling.com.br/Api/v3/oauth/authorize?response_type=code"
+           f"&client_id={client_id}&state={estado_oauth}")
+    print("IMPORTANTE: no painel do seu aplicativo em developer.bling.com.br,")
+    print(f"o 'Link de redirecionamento' deve ser: http://localhost:{porta}/callback")
+    print("\nAbrindo o navegador pra você autorizar...")
+    subprocess.run(["open", url], check=False)
+    print("(se não abrir, cole no navegador:)\n" + url)
+
+    import time
+    for _ in range(300):
+        if resultado.get("code"):
+            break
+        time.sleep(1)
+    servidor.shutdown()
+    if not resultado.get("code"):
+        print("\nNão recebi a autorização em 5 minutos. Tente de novo.")
+        sys.exit(1)
+
+    basic = base64.b64encode(f"{client_id}:{client_secret}".encode()).decode()
+    r = httpx.post(TOKEN_URL,
+                   headers={"Authorization": f"Basic {basic}",
+                            "Content-Type": "application/x-www-form-urlencoded"},
+                   data={"grant_type": "authorization_code",
+                         "code": resultado["code"]},
+                   timeout=20.0)
+    if r.status_code >= 300:
+        print(f"Troca do código falhou ({r.status_code}): {r.text[:300]}")
+        sys.exit(1)
+    tokens = r.json()
+    import time as _t
+    _gravar({"client_id": client_id, "client_secret": client_secret,
+             "access_token": tokens.get("access_token", ""),
+             "refresh_token": tokens.get("refresh_token", ""),
+             "expira_em": _t.time() + int(tokens.get("expires_in", 21600))})
+    print("\nAutorizado! Tokens salvos — e daqui em diante eu renovo sozinho.")
+    print("Teste agora: rayman-bling --testar   e depois: rayman-bling")
+
+
 def testar():
     """Diagnóstico passo a passo da conexão com o Bling."""
     import httpx
@@ -1764,6 +1846,9 @@ def main():
         return
     if args and args[0] == "--testar":
         testar()
+        return
+    if args and args[0] == "--autorizar":
+        autorizar(args[1:])
         return
     if args and args[0] == "--config":
         if len(args) < 4:
