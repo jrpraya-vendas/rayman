@@ -1351,6 +1351,146 @@ if __name__ == "__main__":
     main()
 PYVD
 
+# ---------- rayman-conectar: assistente de conexões ----------
+cat > "$RAYMAN_DIR/rayman_conectar.py" <<'PYCN'
+"""Assistente de conexão do RAYMAN: liga tudo de uma vez.
+
+O que ele conecta (tudo opcional — Enter pula):
+  1. Claude (Anthropic)  -> vira o cérebro de TODAS as respostas
+  2. Supabase            -> suas vendas do Escritório Virtual, por voz
+  3. Twilio              -> RAYMAN no seu WhatsApp, de qualquer lugar
+
+Uso:
+    rayman-conectar                     -> modo pergunta-e-resposta
+    rayman-conectar --env /caminho/.env -> lê tudo do .env do Escritório
+                                           Virtual e conecta sozinho
+    rayman-conectar --status            -> o que está ligado e o que falta
+"""
+import json
+import os
+import subprocess
+import sys
+
+RAYMAN_DIR = os.path.expanduser("~/.openjarvis/rayman")
+JARVIS = os.path.expanduser("~/.openjarvis/.venv/bin/jarvis")
+
+
+def _salvar(nome, conteudo):
+    os.makedirs(RAYMAN_DIR, exist_ok=True)
+    caminho = os.path.join(RAYMAN_DIR, nome)
+    with open(caminho, "w") as f:
+        f.write(conteudo)
+    os.chmod(caminho, 0o600)
+
+
+def _config(chave, valor):
+    subprocess.run([JARVIS, "--quiet", "config", "set", chave, valor],
+                   capture_output=True, text=True)
+
+
+def ligar_claude(chave):
+    chave = (chave or "").strip()
+    if not chave.startswith("sk-"):
+        return False
+    _salvar("anthropic_key.txt", chave)
+    _config("engine.default", "cloud")
+    _config("intelligence.default_model", "claude-haiku-4-5")
+    print("  [ok] Claude ligado como cérebro (claude-haiku-4-5).")
+    return True
+
+
+def ligar_supabase(url, key):
+    url, key = (url or "").strip(), (key or "").strip()
+    if not url.startswith("http") or len(key) < 20:
+        return False
+    _salvar("supabase.json", json.dumps({"url": url.rstrip("/"), "key": key}))
+    print("  [ok] Escritório Virtual (Supabase) conectado.")
+    return True
+
+
+def ligar_twilio(sid, token, de):
+    sid, token, de = (sid or "").strip(), (token or "").strip(), (de or "").strip()
+    if not sid.startswith("AC") or not token or not de:
+        return False
+    if not de.startswith("whatsapp:"):
+        de = "whatsapp:" + de
+    _salvar("twilio.json", json.dumps({"account_sid": sid, "auth_token": token,
+                                       "from_whatsapp": de}))
+    print("  [ok] WhatsApp (Twilio) conectado.")
+    return True
+
+
+def parse_env(caminho):
+    valores = {}
+    try:
+        for linha in open(os.path.expanduser(caminho), encoding="utf-8"):
+            linha = linha.strip()
+            if not linha or linha.startswith("#") or "=" not in linha:
+                continue
+            k, _, v = linha.partition("=")
+            valores[k.strip()] = v.strip().strip('"').strip("'")
+    except Exception as exc:
+        print(f"Não consegui ler {caminho}: {exc}")
+        sys.exit(1)
+    return valores
+
+
+def status():
+    tem = lambda n: os.path.exists(os.path.join(RAYMAN_DIR, n))
+    eng = subprocess.run([JARVIS, "--quiet", "config", "get", "engine.default"],
+                         capture_output=True, text=True).stdout.strip()
+    print("Estado das conexões do RAYMAN:")
+    print(f"  cérebro Claude:      {'LIGADO' if tem('anthropic_key.txt') else 'desligado (rayman-conectar)'}"
+          f"  [engine: {eng or '?'}]")
+    print(f"  vendas (Supabase):   {'LIGADO' if tem('supabase.json') else 'desligado'}")
+    print(f"  WhatsApp (Twilio):   {'LIGADO' if tem('twilio.json') else 'desligado'}")
+    print(f"  Obsidian:            {'LIGADO' if tem('obsidian_vault.txt') else 'desligado'}")
+    print("  busca na web:        sempre ligada (gatilho: 'pesquisa...', 'hoje', 'notícias')")
+
+
+def main():
+    args = sys.argv[1:]
+    if args and args[0] == "--status":
+        status()
+        return
+    ligados = 0
+    if args and args[0] == "--env":
+        if len(args) < 2:
+            print("Uso: rayman-conectar --env /caminho/do/.env")
+            sys.exit(1)
+        v = parse_env(args[1])
+        print("Lendo o .env do Escritório Virtual...")
+        ligados += bool(ligar_claude(v.get("ANTHROPIC_API_KEY", "")))
+        ligados += bool(ligar_supabase(v.get("SUPABASE_URL", ""), v.get("SUPABASE_KEY", "")))
+        ligados += bool(ligar_twilio(v.get("TWILIO_ACCOUNT_SID", ""),
+                                     v.get("TWILIO_AUTH_TOKEN", ""),
+                                     v.get("TWILIO_WHATSAPP_FROM", "")))
+    else:
+        print("Vamos ligar o RAYMAN em tudo. Enter pula qualquer etapa.\n")
+        print("1) Cérebro Claude — chave da Anthropic (console.anthropic.com > API keys)")
+        ligados += bool(ligar_claude(input("   sk-ant-...: ")))
+        print("\n2) Suas vendas — Supabase do Escritório Virtual (Settings > API)")
+        url = input("   SUPABASE_URL (https://xxx.supabase.co): ")
+        key = input("   SUPABASE_KEY (anon public): ") if url.strip() else ""
+        ligados += bool(url.strip() and ligar_supabase(url, key))
+        print("\n3) WhatsApp — Twilio (console.twilio.com)")
+        sid = input("   TWILIO_ACCOUNT_SID (AC...): ")
+        token = input("   TWILIO_AUTH_TOKEN: ") if sid.strip() else ""
+        de = input("   seu número WhatsApp Twilio (whatsapp:+55...): ") if sid.strip() else ""
+        ligados += bool(sid.strip() and ligar_twilio(sid, token, de))
+
+    print(f"\n{ligados} conexão(ões) ativada(s).")
+    status()
+    if ligados:
+        print("\nÚltimo passo (ativa os serviços em segundo plano):")
+        print("  bash ~/Downloads/install_rayman.sh")
+        print('Depois teste por voz: rayman-show -> "como estão as minhas vendas?"')
+
+
+if __name__ == "__main__":
+    main()
+PYCN
+
 # ---------- HUD (página) ----------
 cat > "$RAYMAN_DIR/hud.html" <<'HTMLHUD'
 <!DOCTYPE html>
@@ -1706,13 +1846,17 @@ cat > "$BIN_DIR/rayman-vendas" <<WRAP
 [[ -f "$HOME/.openjarvis/rayman/anthropic_key.txt" ]] && export ANTHROPIC_API_KEY="\$(cat "$HOME/.openjarvis/rayman/anthropic_key.txt")"
 exec "$VENV/bin/python" "$RAYMAN_DIR/rayman_vendas.py" "\$@"
 WRAP
+cat > "$BIN_DIR/rayman-conectar" <<WRAP
+#!/usr/bin/env bash
+exec "$VENV/bin/python" "$RAYMAN_DIR/rayman_conectar.py" "\$@"
+WRAP
 cat > "$BIN_DIR/rayman-obsidian" <<WRAP
 #!/usr/bin/env bash
 [[ -f "$HOME/.openjarvis/rayman/anthropic_key.txt" ]] && export ANTHROPIC_API_KEY="\$(cat "$HOME/.openjarvis/rayman/anthropic_key.txt")"
 exec "$VENV/bin/python" "$RAYMAN_DIR/rayman_obsidian.py" "\$@"
 WRAP
 chmod +x "$BIN_DIR/rayman" "$BIN_DIR/rayman-voz" "$BIN_DIR/rayman-show" \
-         "$BIN_DIR/rayman-hud" "$BIN_DIR/rayman-obsidian" "$BIN_DIR/rayman-web" "$BIN_DIR/rayman-telegram" "$BIN_DIR/rayman-whatsapp" "$BIN_DIR/rayman-claude" "$BIN_DIR/rayman-vendas"
+         "$BIN_DIR/rayman-hud" "$BIN_DIR/rayman-obsidian" "$BIN_DIR/rayman-web" "$BIN_DIR/rayman-telegram" "$BIN_DIR/rayman-whatsapp" "$BIN_DIR/rayman-claude" "$BIN_DIR/rayman-vendas" "$BIN_DIR/rayman-conectar"
 
 # ------------------------------------------------------------
 # 5b. Interface web em tempo real (rayman start)
@@ -1829,6 +1973,7 @@ echo "  rayman-telegram           -> RAYMAN no Telegram (celular, PC, Apple Watc
 echo "  rayman-whatsapp           -> RAYMAN no WhatsApp via Twilio (de qualquer lugar)"
 echo "  rayman-claude CHAVE_API   -> liga o cérebro Claude (opcional, nuvem)"
 echo "  rayman-vendas             -> suas vendas do Escritório Virtual (Supabase)"
+echo "  rayman-conectar           -> liga TUDO de uma vez (Claude, vendas, WhatsApp)"
 echo "  rayman start              -> chat web em tempo real (http://127.0.0.1:8000)"
 echo
 echo "  Se 'rayman' não for encontrado, abra um terminal novo ou rode:"
