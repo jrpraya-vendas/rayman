@@ -46,6 +46,19 @@ O instalador também constrói a interface web oficial do OpenJarvis: rode `raym
 
 ## De qualquer lugar: celular, computador e Apple Watch
 
+### WhatsApp (via Twilio — recomendado se você já usa Twilio)
+
+O `rayman-whatsapp` põe o RAYMAN de plantão no seu WhatsApp usando a sua conta Twilio, por polling da API — sem webhook e sem expor o Mac na internet. Configure uma vez, com os dados do painel da Twilio (Account SID, Auth Token e seu número WhatsApp Twilio):
+
+```bash
+rayman-whatsapp --config ACxxxxxxxxxxxx SEU_AUTH_TOKEN whatsapp:+14155238886
+rayman-whatsapp
+```
+
+As credenciais ficam só no seu Mac (`~/.openjarvis/rayman/twilio.json`). Mande uma mensagem WhatsApp pro seu número Twilio: por segurança, o RAYMAN se tranca no primeiro remetente (você) e ignora o resto. Depois de configurado, rode o instalador de novo e ele vira um serviço que inicia sozinho com o Mac (`com.rayman.whatsapp`), sem terminal aberto. No sandbox da Twilio, lembre de entrar no sandbox (mensagem "join ..." pro número deles) e note que ele expira a cada 72h — pra uso contínuo, registre um número WhatsApp próprio na Twilio.
+
+### Telegram (alternativa gratuita, sem Twilio)
+
 O `rayman-telegram` põe o RAYMAN de plantão no Telegram. Configuração única: no Telegram, fale com o @BotFather, mande `/newbot`, escolha um nome e um usuário pro seu bot; ele te dá um token. Aí rode `rayman-telegram --token SEU_TOKEN` e depois `rayman-telegram` (deixe o terminal aberto e o Mac ligado — `caffeinate -s` em outro terminal impede o Mac de dormir). Mande "oi" pro bot: por segurança, o RAYMAN se tranca no primeiro chat que falar com ele (o seu) e ignora todos os outros. A partir daí você conversa com ele do celular, de qualquer computador, do navegador — e do Apple Watch, respondendo pela notificação do Telegram, inclusive ditando por voz. Os gatilhos valem lá também: "pesquisa..." busca na web, "minhas notas..." consulta o Obsidian.
 
 ## Vozes

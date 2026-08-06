@@ -882,6 +882,168 @@ if __name__ == "__main__":
     main()
 PYTG
 
+# ---------- rayman-whatsapp: de qualquer lugar (Twilio) ----------
+cat > "$RAYMAN_DIR/rayman_whatsapp.py" <<'PYWA'
+"""RAYMAN no WhatsApp, via Twilio: use seu assistente de qualquer lugar.
+
+Funciona por POLLING da API da Twilio — sem webhook, sem expor o Mac
+na internet. O Mac fica ligado rodando este comando (ou o serviço), e você
+conversa com o RAYMAN pelo WhatsApp do celular, tablet, PC ou Apple Watch
+(respondendo pela notificação).
+
+Configuração (uma vez — os dados ficam SÓ no seu Mac):
+    rayman-whatsapp --config ACxxxxxxxx SEU_AUTH_TOKEN whatsapp:+14155238886
+      (Account SID, Auth Token e o seu número WhatsApp da Twilio, nessa ordem;
+       no sandbox da Twilio o número é o whatsapp:+14155238886)
+Depois:
+    rayman-whatsapp
+Mande uma mensagem WhatsApp pro seu número Twilio. Por segurança, o RAYMAN
+se tranca no PRIMEIRO remetente que falar com ele (você) e ignora o resto.
+Pra trocar: apague ~/.openjarvis/rayman/whatsapp_dono.txt.
+
+Gatilhos: "pesquisa ..." busca na internet; "minhas notas ..." consulta o
+Obsidian — iguais aos do modo voz.
+"""
+import json
+import os
+import sys
+import time
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+RAYMAN_DIR = os.path.expanduser("~/.openjarvis/rayman")
+CRED_FILE = os.path.join(RAYMAN_DIR, "twilio.json")
+DONO_FILE = os.path.join(RAYMAN_DIR, "whatsapp_dono.txt")
+API = "https://api.twilio.com/2010-04-01"
+
+
+def ler_credenciais():
+    sid = os.environ.get("TWILIO_ACCOUNT_SID", "")
+    token = os.environ.get("TWILIO_AUTH_TOKEN", "")
+    de = os.environ.get("TWILIO_WHATSAPP_FROM", "")
+    if sid and token and de:
+        return {"account_sid": sid, "auth_token": token, "from_whatsapp": de}
+    if os.path.exists(CRED_FILE):
+        try:
+            return json.load(open(CRED_FILE))
+        except Exception:
+            pass
+    return None
+
+
+def salvar_credenciais(sid, token, de):
+    if not de.startswith("whatsapp:"):
+        de = "whatsapp:" + de
+    os.makedirs(RAYMAN_DIR, exist_ok=True)
+    with open(CRED_FILE, "w") as f:
+        json.dump({"account_sid": sid.strip(), "auth_token": token.strip(),
+                   "from_whatsapp": de.strip()}, f)
+    os.chmod(CRED_FILE, 0o600)
+    print("Credenciais da Twilio salvas (só neste Mac).")
+    print("Agora rode: rayman-whatsapp")
+
+
+def buscar_mensagens(httpx, cred):
+    """Últimas mensagens recebidas no número WhatsApp da Twilio."""
+    url = (f"{API}/Accounts/{cred['account_sid']}/Messages.json"
+           f"?To={cred['from_whatsapp']}&PageSize=20")
+    r = httpx.get(url, auth=(cred["account_sid"], cred["auth_token"]),
+                  timeout=15.0)
+    r.raise_for_status()
+    return r.json().get("messages", [])
+
+
+def enviar(httpx, cred, para, texto):
+    url = f"{API}/Accounts/{cred['account_sid']}/Messages.json"
+    # WhatsApp aceita até ~1600 caracteres por mensagem
+    for i in range(0, max(len(texto), 1), 1500):
+        r = httpx.post(url,
+                       data={"From": cred["from_whatsapp"], "To": para,
+                             "Body": texto[i:i + 1500] or "..."},
+                       auth=(cred["account_sid"], cred["auth_token"]),
+                       timeout=15.0)
+        if r.status_code >= 300:
+            print(f"[rayman] envio falhou ({r.status_code}): {r.text[:200]}",
+                  file=sys.stderr)
+            return False
+    return True
+
+
+def main():
+    args = sys.argv[1:]
+    if args and args[0] == "--config":
+        if len(args) < 4:
+            print("Uso: rayman-whatsapp --config ACCOUNT_SID AUTH_TOKEN whatsapp:+1415...")
+            sys.exit(1)
+        salvar_credenciais(args[1], args[2], args[3])
+        return
+
+    cred = ler_credenciais()
+    if not cred:
+        print(__doc__)
+        sys.exit(1)
+
+    import httpx
+    from rayman_voz import perguntar
+
+    dono = open(DONO_FILE).read().strip() if os.path.exists(DONO_FILE) else ""
+    vistos = set()
+    historicos = {}
+
+    # marca como vistas as mensagens antigas (não responder o passado)
+    try:
+        for m in buscar_mensagens(httpx, cred):
+            vistos.add(m.get("sid"))
+    except Exception as exc:
+        print(f"Não consegui falar com a Twilio: {exc}")
+        print("Confira o SID/token com: rayman-whatsapp --config ...")
+        sys.exit(1)
+
+    print("RAYMAN de plantão no WhatsApp (via Twilio). Ctrl+C para encerrar.")
+    print("Mande uma mensagem WhatsApp pro seu número Twilio pra começar.")
+    while True:
+        try:
+            time.sleep(4)
+            for m in reversed(buscar_mensagens(httpx, cred)):
+                sid = m.get("sid")
+                if sid in vistos or m.get("direction") != "inbound":
+                    continue
+                vistos.add(sid)
+                remetente = m.get("from", "")
+                texto = (m.get("body") or "").strip()
+                if not texto:
+                    continue
+                if not dono:
+                    dono = remetente
+                    with open(DONO_FILE, "w") as f:
+                        f.write(remetente)
+                    print(f"RAYMAN trancado no número {remetente} (o seu).")
+                elif remetente != dono:
+                    print(f"[rayman] ignorando número desconhecido {remetente}")
+                    continue
+                print(f"Julio (whatsapp): {texto}")
+                hist = historicos.setdefault(remetente, [])
+                try:
+                    resposta = perguntar(texto, hist)
+                except Exception as exc:
+                    resposta = f"Tive um problema aqui, senhor: {exc}"
+                hist += [("Julio", texto), ("RAYMAN", resposta)]
+                del hist[:-12]
+                enviar(httpx, cred, remetente, resposta)
+                print(f"RAYMAN: {resposta[:120]}")
+        except KeyboardInterrupt:
+            print("\nRAYMAN saiu do WhatsApp.")
+            return
+        except Exception as exc:
+            print(f"[rayman] erro no loop ({exc}); tentando de novo em 15 s",
+                  file=sys.stderr)
+            time.sleep(15)
+
+
+if __name__ == "__main__":
+    main()
+PYWA
+
 # ---------- HUD (página) ----------
 cat > "$RAYMAN_DIR/hud.html" <<'HTMLHUD'
 <!DOCTYPE html>
@@ -1147,12 +1309,16 @@ cat > "$BIN_DIR/rayman-telegram" <<WRAP
 #!/usr/bin/env bash
 exec "$VENV/bin/python" "$RAYMAN_DIR/rayman_telegram.py" "\$@"
 WRAP
+cat > "$BIN_DIR/rayman-whatsapp" <<WRAP
+#!/usr/bin/env bash
+exec "$VENV/bin/python" "$RAYMAN_DIR/rayman_whatsapp.py" "\$@"
+WRAP
 cat > "$BIN_DIR/rayman-obsidian" <<WRAP
 #!/usr/bin/env bash
 exec "$VENV/bin/python" "$RAYMAN_DIR/rayman_obsidian.py" "\$@"
 WRAP
 chmod +x "$BIN_DIR/rayman" "$BIN_DIR/rayman-voz" "$BIN_DIR/rayman-show" \
-         "$BIN_DIR/rayman-hud" "$BIN_DIR/rayman-obsidian" "$BIN_DIR/rayman-web" "$BIN_DIR/rayman-telegram"
+         "$BIN_DIR/rayman-hud" "$BIN_DIR/rayman-obsidian" "$BIN_DIR/rayman-web" "$BIN_DIR/rayman-telegram" "$BIN_DIR/rayman-whatsapp"
 
 # ------------------------------------------------------------
 # 5b. Interface web em tempo real (rayman start)
@@ -1211,6 +1377,34 @@ PLXML
 fi
 
 # ------------------------------------------------------------
+# 5e. RAYMAN no WhatsApp como serviço (auto-início com o Mac)
+#     Só ativa se as credenciais da Twilio já estiverem salvas.
+# ------------------------------------------------------------
+if [[ -f "$RAYMAN_DIR/twilio.json" ]]; then
+    say_step "Ativando o RAYMAN no WhatsApp como serviço (inicia com o Mac)"
+    PLIST_WA="$HOME/Library/LaunchAgents/com.rayman.whatsapp.plist"
+    mkdir -p "$HOME/Library/LaunchAgents"
+    cat > "$PLIST_WA" <<PLXML2
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>com.rayman.whatsapp</string>
+  <key>ProgramArguments</key><array>
+    <string>$VENV/bin/python</string>
+    <string>$RAYMAN_DIR/rayman_whatsapp.py</string>
+  </array>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>StandardOutPath</key><string>$RAYMAN_DIR/whatsapp.log</string>
+  <key>StandardErrorPath</key><string>$RAYMAN_DIR/whatsapp.log</string>
+</dict></plist>
+PLXML2
+    launchctl unload "$PLIST_WA" 2>/dev/null || true
+    launchctl load "$PLIST_WA" 2>/dev/null || true
+    echo "RAYMAN de plantão no WhatsApp (serviço com.rayman.whatsapp; log em $RAYMAN_DIR/whatsapp.log)."
+fi
+
+# ------------------------------------------------------------
 # 6. Validação
 # ------------------------------------------------------------
 say_step "Validando a instalação (jarvis doctor)"
@@ -1236,6 +1430,7 @@ echo "  rayman-obsidian           -> sincroniza suas notas do Obsidian"
 echo "  rayman-obsidian \"pergunta\" -> pergunta usando as notas"
 echo "  rayman-web \"pergunta\"    -> busca na internet em tempo real"
 echo "  rayman-telegram           -> RAYMAN no Telegram (celular, PC, Apple Watch)"
+echo "  rayman-whatsapp           -> RAYMAN no WhatsApp via Twilio (de qualquer lugar)"
 echo "  rayman start              -> chat web em tempo real (http://127.0.0.1:8000)"
 echo
 echo "  Se 'rayman' não for encontrado, abra um terminal novo ou rode:"
