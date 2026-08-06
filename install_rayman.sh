@@ -322,10 +322,19 @@ def perguntar(pergunta, historico):
     baixa = pergunta.lower()
     if any(g in baixa for g in VENDAS):
         try:
+            from rayman_bling import contexto_bling
+            ctx_b = contexto_bling()
+            if ctx_b:
+                contexto += ctx_b[:3000] + "\n\n"
+        except Exception as exc:
+            print(f"[rayman] bling indisponível: {exc}", file=sys.stderr)
+        try:
             from rayman_vendas import contexto_vendas
             ctx_v = contexto_vendas(pergunta)
             if ctx_v:
-                contexto += ctx_v[:3500] + "\n\n"
+                rotulo = ("DADOS DE MARKETING (Supabase do Escritório Virtual — "
+                          "vídeos e métricas; NÃO são as vendas oficiais):\n")
+                contexto += rotulo + ctx_v[:2500] + "\n\n"
         except Exception as exc:
             print(f"[rayman] vendas indisponível: {exc}", file=sys.stderr)
     if any(g in baixa for g in WEB):
@@ -1522,6 +1531,210 @@ if __name__ == "__main__":
     main()
 PYCN
 
+# ---------- rayman-bling: vendas reais (Bling ERP) ----------
+cat > "$RAYMAN_DIR/rayman_bling.py" <<'PYBL'
+"""RAYMAN + Bling ERP: suas vendas REAIS, por voz.
+
+O Bling é onde vivem os pedidos e o estoque de verdade. Este conector usa a
+API v3 do Bling (Bearer token OAuth) e alimenta o RAYMAN com: pedidos e
+faturamento dos últimos dias, e estoque atual dos produtos.
+
+Configuração (uma vez) — escolha UMA das formas:
+
+  A) Duradoura (recomendada): crie um aplicativo em developer.bling.com.br,
+     autorize sua conta e pegue client_id, client_secret e refresh_token:
+         rayman-bling --config CLIENT_ID CLIENT_SECRET REFRESH_TOKEN
+     (o RAYMAN renova o token sozinho a partir daí)
+
+  B) Rápida (expira em ~6h, boa pra testar):
+         rayman-bling --token SEU_ACCESS_TOKEN
+
+Uso:
+    rayman-bling               -> resumo: vendas de hoje/semana + estoque
+    rayman-bling "pergunta"    -> pergunta livre sobre as vendas reais
+Por voz: os mesmos gatilhos de vendas ("minhas vendas", "faturamento",
+"estoque"...) — o Bling entra como fonte principal, o Supabase como apoio.
+"""
+import datetime as dt
+import json
+import os
+import subprocess
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+RAYMAN_DIR = os.path.expanduser("~/.openjarvis/rayman")
+CRED_FILE = os.path.join(RAYMAN_DIR, "bling.json")
+JARVIS = os.path.expanduser("~/.openjarvis/.venv/bin/jarvis")
+API = "https://api.bling.com.br/Api/v3"
+TOKEN_URL = "https://www.bling.com.br/Api/v3/oauth/token"
+
+
+def _ler():
+    if os.path.exists(CRED_FILE):
+        try:
+            return json.load(open(CRED_FILE))
+        except Exception:
+            pass
+    return {}
+
+
+def _gravar(cred):
+    os.makedirs(RAYMAN_DIR, exist_ok=True)
+    with open(CRED_FILE, "w") as f:
+        json.dump(cred, f)
+    os.chmod(CRED_FILE, 0o600)
+
+
+def token(httpx):
+    """Access token válido; renova via refresh_token quando expira."""
+    cred = _ler()
+    if not cred:
+        return ""
+    import time
+    if cred.get("access_token") and time.time() < cred.get("expira_em", 0) - 120:
+        return cred["access_token"]
+    if not (cred.get("client_id") and cred.get("refresh_token")):
+        return cred.get("access_token", "")  # modo --token simples
+    import base64
+    basic = base64.b64encode(
+        f"{cred['client_id']}:{cred.get('client_secret', '')}".encode()).decode()
+    r = httpx.post(TOKEN_URL,
+                   headers={"Authorization": f"Basic {basic}",
+                            "Content-Type": "application/x-www-form-urlencoded"},
+                   data={"grant_type": "refresh_token",
+                         "refresh_token": cred["refresh_token"]},
+                   timeout=20.0)
+    if r.status_code >= 300:
+        print(f"[rayman] renovação do token Bling falhou: {r.text[:200]}",
+              file=sys.stderr)
+        return cred.get("access_token", "")
+    novo = r.json()
+    cred["access_token"] = novo.get("access_token", "")
+    if novo.get("refresh_token"):
+        cred["refresh_token"] = novo["refresh_token"]  # Bling rotaciona
+    cred["expira_em"] = time.time() + int(novo.get("expires_in", 21600))
+    _gravar(cred)
+    return cred["access_token"]
+
+
+def _get(httpx, tk, caminho, params=""):
+    r = httpx.get(f"{API}{caminho}?{params}",
+                  headers={"Authorization": f"Bearer {tk}",
+                           "Accept": "application/json"},
+                  timeout=20.0)
+    r.raise_for_status()
+    return r.json().get("data", [])
+
+
+def _num(x):
+    try:
+        return float(x or 0)
+    except Exception:
+        return 0.0
+
+
+def coletar(httpx, tk, dias=7):
+    hoje = dt.date.today()
+    ini = hoje - dt.timedelta(days=dias - 1)
+    pedidos = _get(httpx, tk, "/pedidos/vendas",
+                   f"dataInicial={ini}&dataFinal={hoje}&limite=100")
+    produtos = _get(httpx, tk, "/produtos", "limite=100&criterio=2")
+    return pedidos, produtos, hoje
+
+
+def contexto_bling(dias=7):
+    """Resumo das vendas reais do Bling; '' se não configurado/falhar."""
+    if not _ler():
+        return ""
+    try:
+        import httpx
+        tk = token(httpx)
+        if not tk:
+            return ""
+        pedidos, produtos, hoje = coletar(httpx, tk, dias)
+    except Exception as exc:
+        print(f"[rayman] Bling indisponível: {exc}", file=sys.stderr)
+        return ""
+
+    linhas = [f"VENDAS REAIS DO BLING (fonte oficial — últimos {dias} dias):"]
+    tot_periodo, tot_hoje, n_hoje = 0.0, 0.0, 0
+    for p in pedidos:
+        total = _num(p.get("total") or p.get("totalVenda"))
+        tot_periodo += total
+        data = str(p.get("data", ""))[:10]
+        if data == str(hoje):
+            tot_hoje += total
+            n_hoje += 1
+    linhas.append(f"HOJE ({hoje}): {n_hoje} pedido(s), R${tot_hoje:.2f}")
+    linhas.append(f"PERÍODO: {len(pedidos)} pedido(s), R${tot_periodo:.2f}")
+    ultimos = sorted(pedidos, key=lambda p: str(p.get("data", "")), reverse=True)[:6]
+    for p in ultimos:
+        contato = (p.get("contato") or {}).get("nome", "?")
+        situacao = (p.get("situacao") or {})
+        situacao = situacao.get("valor") or situacao.get("id") or ""
+        linhas.append(f"- {str(p.get('data', ''))[:10]} | {contato} | "
+                      f"R${_num(p.get('total')):.2f} | situação {situacao}")
+
+    com_estoque = 0
+    linhas.append(f"\nESTOQUE (até 100 produtos ativos):")
+    for pr in produtos[:15]:
+        est = pr.get("estoque")
+        saldo = est.get("saldoVirtualTotal") if isinstance(est, dict) else est
+        if _num(saldo) > 0:
+            com_estoque += 1
+        linhas.append(f"- {pr.get('nome', '?')[:40]}: estoque {saldo}, "
+                      f"preço R${_num(pr.get('preco')):.2f}")
+    linhas.append(f"(produtos com estoque > 0 na amostra: {com_estoque})")
+    return "\n".join(linhas)
+
+
+def perguntar(pergunta):
+    import re
+    ctx = contexto_bling()
+    if not ctx:
+        print("Bling não configurado ou inacessível. Veja: rayman-bling --help")
+        sys.exit(1)
+    prompt = (ctx + "\n\nCom base SOMENTE nos dados acima, responda ao Julio "
+              "de forma direta e falada, com os números principais: " + pergunta)
+    out = subprocess.run([JARVIS, "--quiet", "ask", "--no-stream", prompt],
+                         capture_output=True, text=True, timeout=300)
+    resposta = re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "", out.stdout).strip()
+    print(resposta or out.stderr.strip()[-300:])
+    return resposta
+
+
+def main():
+    args = sys.argv[1:]
+    if args and args[0] in ("--help", "-h"):
+        print(__doc__)
+        return
+    if args and args[0] == "--config":
+        if len(args) < 4:
+            print("Uso: rayman-bling --config CLIENT_ID CLIENT_SECRET REFRESH_TOKEN")
+            sys.exit(1)
+        _gravar({"client_id": args[1], "client_secret": args[2],
+                 "refresh_token": args[3]})
+        print("Bling configurado (renovação automática). Teste: rayman-bling")
+        return
+    if args and args[0] == "--token":
+        if len(args) < 2:
+            print("Uso: rayman-bling --token ACCESS_TOKEN")
+            sys.exit(1)
+        import time
+        _gravar({"access_token": args[1], "expira_em": time.time() + 6 * 3600})
+        print("Token do Bling salvo (expira em ~6h). Teste: rayman-bling")
+        return
+    if args:
+        perguntar(" ".join(args))
+    else:
+        perguntar("resuma minhas vendas de hoje e da semana, e o estoque")
+
+
+if __name__ == "__main__":
+    main()
+PYBL
+
 # ---------- HUD (página) ----------
 cat > "$RAYMAN_DIR/hud.html" <<'HTMLHUD'
 <!DOCTYPE html>
@@ -1881,13 +2094,18 @@ cat > "$BIN_DIR/rayman-conectar" <<WRAP
 #!/usr/bin/env bash
 exec "$VENV/bin/python" "$RAYMAN_DIR/rayman_conectar.py" "\$@"
 WRAP
+cat > "$BIN_DIR/rayman-bling" <<WRAP
+#!/usr/bin/env bash
+[[ -f "$HOME/.openjarvis/rayman/anthropic_key.txt" ]] && export ANTHROPIC_API_KEY="\$(cat "$HOME/.openjarvis/rayman/anthropic_key.txt")"
+exec "$VENV/bin/python" "$RAYMAN_DIR/rayman_bling.py" "\$@"
+WRAP
 cat > "$BIN_DIR/rayman-obsidian" <<WRAP
 #!/usr/bin/env bash
 [[ -f "$HOME/.openjarvis/rayman/anthropic_key.txt" ]] && export ANTHROPIC_API_KEY="\$(cat "$HOME/.openjarvis/rayman/anthropic_key.txt")"
 exec "$VENV/bin/python" "$RAYMAN_DIR/rayman_obsidian.py" "\$@"
 WRAP
 chmod +x "$BIN_DIR/rayman" "$BIN_DIR/rayman-voz" "$BIN_DIR/rayman-show" \
-         "$BIN_DIR/rayman-hud" "$BIN_DIR/rayman-obsidian" "$BIN_DIR/rayman-web" "$BIN_DIR/rayman-telegram" "$BIN_DIR/rayman-whatsapp" "$BIN_DIR/rayman-claude" "$BIN_DIR/rayman-vendas" "$BIN_DIR/rayman-conectar"
+         "$BIN_DIR/rayman-hud" "$BIN_DIR/rayman-obsidian" "$BIN_DIR/rayman-web" "$BIN_DIR/rayman-telegram" "$BIN_DIR/rayman-whatsapp" "$BIN_DIR/rayman-claude" "$BIN_DIR/rayman-vendas" "$BIN_DIR/rayman-conectar" "$BIN_DIR/rayman-bling"
 
 # ------------------------------------------------------------
 # 5b. Interface web em tempo real (rayman start)
@@ -2003,7 +2221,8 @@ echo "  rayman-web \"pergunta\"    -> busca na internet em tempo real"
 echo "  rayman-telegram           -> RAYMAN no Telegram (celular, PC, Apple Watch)"
 echo "  rayman-whatsapp           -> RAYMAN no WhatsApp via Twilio (de qualquer lugar)"
 echo "  rayman-claude CHAVE_API   -> liga o cérebro Claude (opcional, nuvem)"
-echo "  rayman-vendas             -> suas vendas do Escritório Virtual (Supabase)"
+echo "  rayman-bling              -> vendas REAIS e estoque do Bling ERP"
+echo "  rayman-vendas             -> métricas de marketing (Supabase)"
 echo "  rayman-conectar           -> liga TUDO de uma vez (Claude, vendas, WhatsApp)"
 echo "  rayman start              -> chat web em tempo real (http://127.0.0.1:8000)"
 echo
