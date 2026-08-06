@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<title>RAYMAN — autorização</title>
+<style>
+  body { background:#04070c; color:#cfe9f5; font-family:"SF Mono",ui-monospace,Menlo,monospace;
+         display:flex; flex-direction:column; align-items:center; justify-content:center;
+         min-height:100vh; margin:0; padding:24px; text-align:center; }
+  h1 { color:#35c8f5; letter-spacing:.3em; font-size:20px; }
+  .caixa { background:#0a1220; border:1px solid #1d3a4d; border-radius:12px;
+           padding:28px; max-width:680px; margin-top:12px; }
+  code { display:block; background:#04070c; border:1px solid #35c8f5; border-radius:8px;
+         padding:16px; margin:18px 0; font-size:15px; color:#46e6a0; word-break:break-all; }
+  button { background:#35c8f5; color:#04070c; border:0; border-radius:8px;
+           padding:12px 26px; font-size:15px; font-weight:bold; cursor:pointer; }
+  button:active { transform:scale(.97); }
+  .ok { color:#46e6a0; } .erro { color:#f56a6a; }
+  p { line-height:1.6; }
+</style>
+</head>
+<body>
+  <h1>RAYMAN</h1>
+  <div class="caixa" id="painel">
+    <p>Lendo a autorização do Mercado Livre...</p>
+  </div>
+<script>
+  const q = new URLSearchParams(location.search);
+  const code = q.get("code");
+  const painel = document.getElementById("painel");
+  if (code) {
+    const cmd = "rayman-ml --codigo " + code;
+    painel.innerHTML =
+      "<p class='ok'>Autorização recebida! Falta um passo:</p>" +
+      "<p>cole este comando no Terminal do seu Mac (o código expira em poucos minutos):</p>" +
+      "<code id='cmd'></code>" +
+      "<button onclick=\"navigator.clipboard.writeText(document.getElementById('cmd').textContent).then(()=>{this.textContent='Copiado!'})\">Copiar comando</button>" +
+      "<p style='color:#5b7a8a;font-size:12px;margin-top:18px'>Este código só funciona junto com a chave secreta que está no seu Mac — sozinho, ele não dá acesso a nada.</p>";
+    document.getElementById("cmd").textContent = cmd;
+  } else {
+    painel.innerHTML = "<p class='erro'>Não veio o código de autorização.</p>" +
+      "<p>Volte ao Terminal e rode <code style='display:inline;padding:2px 8px'>rayman-ml --autorizar</code> de novo.</p>";
+  }
+</script>
+</body>
+</html>

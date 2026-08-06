@@ -1957,16 +1957,14 @@ por voz: pedidos de hoje, faturamento da semana, o que vendeu, status.
 Configuração (uma vez):
   1. Acesse developers.mercadolivre.com.br > Suas integrações > Criar aplicação
      - Nome: RAYMAN (ou o que quiser)
-     - URI de redirect: https://localhost:8798/callback
+     - URI de redirect: https://jrpraya-vendas.github.io/rayman/callback.html
      - Escopos: read (offline_access marcado, pra renovar sozinho)
   2. Copie o App ID (client_id) e a Secret Key e rode:
          rayman-ml --config APP_ID SECRET_KEY
   3. Autorize no navegador:
          rayman-ml --autorizar
-     (o navegador vai avisar "conexão não é particular" no localhost —
-      é o esperado: clique em Avançado > Continuar. Se a página não abrir,
-      copie a URL inteira da barra de endereço e rode:
-         rayman-ml --codigo "URL_COLADA")
+     Clique em Permitir; a página do RAYMAN te mostra o comando final
+     (rayman-ml --codigo ...) com botão de copiar.
 
 Uso:
     rayman-ml                  -> resumo: pedidos e faturamento
@@ -1988,7 +1986,7 @@ JARVIS = os.path.expanduser("~/.openjarvis/.venv/bin/jarvis")
 API = "https://api.mercadolibre.com"
 AUTH_URL = "https://auth.mercadolivre.com.br/authorization"
 TOKEN_URL = "https://api.mercadolibre.com/oauth/token"
-REDIRECT = "https://localhost:8798/callback"
+REDIRECT = "https://jrpraya-vendas.github.io/rayman/callback.html"
 
 
 def _ler():
@@ -2069,76 +2067,20 @@ def usar_codigo(codigo):
 
 
 def autorizar():
-    """Abre a autorização; captura o código num servidorzinho https local."""
-    import http.server
-    import ssl
+    """Abre a autorização no navegador; a página do GitHub mostra o comando."""
     import subprocess as sp
-    import tempfile
-    import threading
-    import time
 
     cred = _ler()
     if not cred.get("client_id"):
         print("Rode antes: rayman-ml --config APP_ID SECRET_KEY")
         sys.exit(1)
-
     url = (f"{AUTH_URL}?response_type=code&client_id={cred['client_id']}"
            f"&redirect_uri={REDIRECT}")
-    resultado = {}
-
-    class Callback(http.server.BaseHTTPRequestHandler):
-        def log_message(self, *a):
-            pass
-
-        def do_GET(self):
-            import urllib.parse
-            q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
-            if q.get("code"):
-                resultado["code"] = q["code"][0]
-                corpo = "<h2>Pode fechar. RAYMAN conectado ao Mercado Livre.</h2>"
-            else:
-                corpo = "<h2>Não veio o código — tente de novo.</h2>"
-            dados = corpo.encode()
-            self.send_response(200)
-            self.send_header("Content-Type", "text/html; charset=utf-8")
-            self.send_header("Content-Length", str(len(dados)))
-            self.end_headers()
-            self.wfile.write(dados)
-
-    servidor = None
-    try:
-        # certificado autoassinado só pro localhost (o ML exige https)
-        pasta = tempfile.mkdtemp()
-        cert, chave = os.path.join(pasta, "c.pem"), os.path.join(pasta, "k.pem")
-        sp.run(["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes",
-                "-keyout", chave, "-out", cert, "-days", "2",
-                "-subj", "/CN=localhost"], capture_output=True, check=True)
-        ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-        ctx.load_cert_chain(cert, chave)
-        servidor = http.server.HTTPServer(("127.0.0.1", 8798), Callback)
-        servidor.socket = ctx.wrap_socket(servidor.socket, server_side=True)
-        threading.Thread(target=servidor.serve_forever, daemon=True).start()
-    except Exception as exc:
-        print(f"(sem servidor local: {exc} — use o plano B abaixo)")
-
     print("Abrindo o navegador pra autorizar no Mercado Livre...")
     sp.run(["open", url], check=False)
     print("(se não abrir, cole no navegador:)\n" + url)
-    print("\nO navegador vai avisar que localhost 'não é particular' —")
-    print("clique em Avançado > Continuar. É o seu próprio computador.")
-    print("\nPLANO B: se a página final não carregar, copie a URL inteira da")
-    print('barra de endereço e rode:  rayman-ml --codigo "URL_AQUI"')
-
-    for _ in range(300):
-        if resultado.get("code"):
-            break
-        time.sleep(1)
-    if servidor:
-        servidor.shutdown()
-    if not resultado.get("code"):
-        print("\nNão recebi o código em 5 minutos — use o PLANO B acima.")
-        sys.exit(1)
-    usar_codigo(resultado["code"])
+    print("\nDepois de clicar em Permitir, uma página do RAYMAN vai te mostrar")
+    print("o comando exato pra colar aqui no Terminal (rayman-ml --codigo ...).")
 
 
 def coletar(httpx, tk, dias=7):
