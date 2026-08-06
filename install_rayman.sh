@@ -454,6 +454,13 @@ cat > "$RAYMAN_DIR/rayman_hud.py" <<'PYHUD'
 Sobe um servidorzinho local (só neste computador) e abre o HUD no navegador.
 Rode junto com o rayman-voz (em outro terminal) ou use o rayman-show,
 que orquestra os dois.
+
+Temas de visualização:
+    rayman-hud --tema reator   # anéis do reator (padrão)
+    rayman-hud --tema esfera   # esfera holográfica de partículas
+    rayman-hud --tema onda     # osciloscópio de energia
+    rayman-hud --tema rosto    # o holograma com rosto
+A escolha fica salva e vale também pro rayman-show.
 """
 import http.server
 import json
@@ -465,6 +472,8 @@ import threading
 
 RAYMAN_DIR = os.path.expanduser("~/.openjarvis/rayman")
 STATE = os.path.join(RAYMAN_DIR, "hud_state.json")
+TEMA_FILE = os.path.join(RAYMAN_DIR, "hud_tema.txt")
+TEMAS = ("reator", "esfera", "onda", "rosto")
 PORT = int(os.environ.get("RAYMAN_HUD_PORT", "8765"))
 
 
@@ -489,7 +498,15 @@ class Handler(http.server.BaseHTTPRequestHandler):
             except Exception:
                 dados = b'{"status": "espera"}'
             self._corpo(dados, "application/json")
-        elif self.path in ("/", "/index.html", "/hud.html"):
+        elif self.path.startswith("/tema.txt"):
+            tema = b"reator"
+            try:
+                with open(TEMA_FILE, "rb") as f:
+                    tema = f.read().strip() or tema
+            except Exception:
+                pass
+            self._corpo(tema, "text/plain")
+        elif self.path.startswith(("/", "/index.html", "/hud.html")):
             with open(os.path.join(RAYMAN_DIR, "hud.html"), "rb") as f:
                 self._corpo(f.read(), "text/html; charset=utf-8")
         else:
@@ -523,6 +540,16 @@ def iniciar(abrir=True, bloquear=True):
 
 
 if __name__ == "__main__":
+    if "--tema" in sys.argv:
+        idx = sys.argv.index("--tema")
+        tema = sys.argv[idx + 1] if len(sys.argv) > idx + 1 else ""
+        if tema not in TEMAS:
+            print("Temas disponíveis:", ", ".join(TEMAS))
+            sys.exit(1)
+        os.makedirs(RAYMAN_DIR, exist_ok=True)
+        with open(TEMA_FILE, "w") as f:
+            f.write(tema)
+        print(f"Tema salvo: {tema} (vale pro rayman-hud e pro rayman-show)")
     try:
         iniciar(abrir="--no-open" not in sys.argv)
     except KeyboardInterrupt:
@@ -1149,8 +1176,6 @@ cat > "$RAYMAN_DIR/hud.html" <<'HTMLHUD'
   body { font-family:"SF Mono",ui-monospace,Menlo,monospace; color:#cfe9f5;
          display:flex; flex-direction:column; align-items:center;
          justify-content:center; }
-
-  /* grade em perspectiva no chão */
   #grade { position:fixed; left:-50%; right:-50%; bottom:-12%; height:46%;
     background:
       repeating-linear-gradient(90deg, rgba(53,200,245,.10) 0 1px, transparent 1px 70px),
@@ -1158,25 +1183,19 @@ cat > "$RAYMAN_DIR/hud.html" <<'HTMLHUD'
     transform:perspective(600px) rotateX(64deg); opacity:.5;
     mask-image:linear-gradient(to top, black 30%, transparent);
     -webkit-mask-image:linear-gradient(to top, black 30%, transparent); }
-
-  /* varredura */
   #scan { position:fixed; inset:0; pointer-events:none; opacity:.5;
     background:linear-gradient(to bottom, transparent 0%,
       rgba(53,200,245,.05) 48%, rgba(53,200,245,.14) 50%,
       rgba(53,200,245,.05) 52%, transparent 100%);
     background-size:100% 240px; animation:varrer 7s linear infinite; }
   @keyframes varrer { from{background-position-y:-240px} to{background-position-y:110vh} }
-
-  /* cantoneiras */
   .canto { position:fixed; width:56px; height:56px; opacity:.6;
            border:2px solid var(--cor); transition:border-color .6s; }
   .canto.a { top:18px; left:18px;  border-right:0; border-bottom:0; }
   .canto.b { top:18px; right:18px; border-left:0;  border-bottom:0; }
   .canto.c { bottom:18px; left:18px;  border-right:0; border-top:0; }
   .canto.d { bottom:18px; right:18px; border-left:0;  border-top:0; }
-
-  canvas#rosto { display:block; }
-
+  canvas#palco { display:block; }
   #status { margin-top:6px; font-size:14px; letter-spacing:.6em; padding-left:.6em;
             text-transform:uppercase; color:var(--cor); transition:color .6s;
             text-shadow:0 0 14px var(--cor); }
@@ -1196,31 +1215,146 @@ cat > "$RAYMAN_DIR/hud.html" <<'HTMLHUD'
   <div id="grade"></div><div id="scan"></div>
   <div class="canto a"></div><div class="canto b"></div>
   <div class="canto c"></div><div class="canto d"></div>
-  <div id="titulo">RAYMAN &middot; NÚCLEO LOCAL</div>
+  <div id="titulo">RAYMAN</div>
   <div id="relogio"></div>
-  <canvas id="rosto" width="640" height="520"></canvas>
+  <canvas id="palco" width="640" height="520"></canvas>
   <div id="status">em espera</div>
   <div class="fala">
     <div class="voce" id="voce"></div>
     <div class="rayman" id="resposta"></div>
   </div>
-  <div id="marca">100% LOCAL &middot; SEM NUVEM</div>
+  <div id="marca">RAYMAN &middot; AO SEU DISPOR</div>
 
 <script>
 const CORES = { ouvindo:"#35c8f5", pensando:"#f5b53a", falando:"#46e6a0", espera:"#3a7a94" };
 const ROTULOS = { ouvindo:"ouvindo", pensando:"processando", falando:"falando", espera:"em espera" };
-let estado = "espera", ultimaFala = 0;
+let estado = "espera";
 
-const cv = document.getElementById("rosto"), cx = cv.getContext("2d");
+const cv = document.getElementById("palco"), cx = cv.getContext("2d");
 const W = cv.width, H = cv.height, CX = W/2, CY = H/2 - 10;
 
-/* contorno da cabeça (metade direita; a esquerda é espelhada) */
+/* intensidade 0..1 por estado (anima transições) */
+let nivel = 0;
+function alvoNivel() {
+  return estado === "falando" ? 1 : estado === "pensando" ? .6
+       : estado === "ouvindo" ? .35 : .12;
+}
+
+/* ============== TEMA: reator (anéis do reator arc) ============== */
+function desenharReator(t, cor) {
+  // núcleo
+  const g = cx.createRadialGradient(CX, CY, 4, CX, CY, 90 + nivel*30);
+  g.addColorStop(0, "#eafaff"); g.addColorStop(.25, cor);
+  g.addColorStop(1, "transparent");
+  cx.save();
+  cx.globalAlpha = .55 + nivel*.4 + Math.sin(t*3)*.05;
+  cx.fillStyle = g;
+  cx.beginPath(); cx.arc(CX, CY, 90 + nivel*30, 0, Math.PI*2); cx.fill();
+  cx.restore();
+  // anéis segmentados girando
+  const aneis = [
+    [70, 10, 1, t*0.9], [110, 16, 2, -t*0.5],
+    [150, 24, 1.6, t*0.3], [195, 12, 1, -t*0.7], [225, 40, .8, t*0.15]
+  ];
+  cx.save(); cx.translate(CX, CY);
+  aneis.forEach(([r, seg, lw, rot], i) => {
+    cx.save(); cx.rotate(rot);
+    cx.strokeStyle = cor; cx.lineWidth = lw;
+    cx.shadowColor = cor; cx.shadowBlur = 10 + nivel*14;
+    cx.globalAlpha = .35 + nivel*.5 - i*.04;
+    for (let s = 0; s < seg; s++) {
+      const a0 = (s/seg)*Math.PI*2, a1 = a0 + (Math.PI*2/seg)*0.55;
+      cx.beginPath(); cx.arc(0, 0, r, a0, a1); cx.stroke();
+    }
+    cx.restore();
+  });
+  // ticks radiais
+  cx.strokeStyle = cor; cx.globalAlpha = .5; cx.lineWidth = 1.5;
+  for (let i = 0; i < 12; i++) {
+    const a = (i/12)*Math.PI*2 + t*0.05;
+    cx.beginPath();
+    cx.moveTo(Math.cos(a)*238, Math.sin(a)*238);
+    cx.lineTo(Math.cos(a)*(244 + nivel*6), Math.sin(a)*(244 + nivel*6));
+    cx.stroke();
+  }
+  cx.restore();
+}
+
+/* ============== TEMA: esfera (holograma de partículas) ============== */
+const PONTOS = [];
+for (let i = 0; i < 420; i++) {           // espiral de Fibonacci na esfera
+  const y = 1 - (i/419)*2, r = Math.sqrt(1 - y*y), a = i*2.39996;
+  PONTOS.push([Math.cos(a)*r, y, Math.sin(a)*r]);
+}
+function desenharEsfera(t, cor) {
+  const R = 150 + nivel*22 + Math.sin(t*2.2)*4*nivel;
+  const ry = t*0.5, rx = 0.35 + Math.sin(t*0.2)*0.1;
+  cx.save(); cx.translate(CX, CY);
+  // halo
+  const g = cx.createRadialGradient(0,0,R*.4, 0,0,R*1.5);
+  g.addColorStop(0, "transparent"); g.addColorStop(.75, cor+"18");
+  g.addColorStop(1, "transparent");
+  cx.fillStyle = g; cx.beginPath(); cx.arc(0,0,R*1.5,0,Math.PI*2); cx.fill();
+  // anel equatorial
+  cx.strokeStyle = cor; cx.globalAlpha = .35; cx.lineWidth = 1;
+  cx.beginPath(); cx.ellipse(0, 0, R*1.25, R*0.32, -0.18, 0, Math.PI*2); cx.stroke();
+  cx.globalAlpha = 1;
+  for (const [x0,y0,z0] of PONTOS) {
+    // rotação Y depois X
+    let x = x0*Math.cos(ry) + z0*Math.sin(ry);
+    let z = -x0*Math.sin(ry) + z0*Math.cos(ry);
+    let y = y0*Math.cos(rx) - z*Math.sin(rx);
+    z = y0*Math.sin(rx) + z*Math.cos(rx);
+    const persp = 1.6/(1.6 + z);           // z em [-1,1]
+    const px = x*R*persp, py = y*R*persp;
+    const frente = (1 - z)/2;              // 0 atrás .. 1 na frente
+    const tam = (0.8 + frente*1.8) * (1 + nivel*.5);
+    cx.globalAlpha = 0.12 + frente*0.75;
+    cx.fillStyle = frente > .82 ? "#eafaff" : cor;
+    cx.beginPath(); cx.arc(px, py, tam, 0, Math.PI*2); cx.fill();
+  }
+  cx.restore();
+}
+
+/* ============== TEMA: onda (osciloscópio) ============== */
+function desenharOnda(t, cor) {
+  cx.save();
+  cx.strokeStyle = cor; cx.shadowColor = cor;
+  const linhas = [ [1, 3, 0], [.45, 1.5, 1.3], [.22, 1, 2.6] ];
+  for (const [amp, lw, fase] of linhas) {
+    cx.lineWidth = lw; cx.shadowBlur = 18*amp;
+    cx.globalAlpha = .25 + amp*.75;
+    cx.beginPath();
+    for (let x = 0; x <= W; x += 3) {
+      const f = x/W, env = Math.sin(f*Math.PI);
+      const soma = Math.sin(t*4 + fase + f*11)*32
+                 + Math.sin(t*9 + fase + f*23)*18
+                 + Math.sin(t*15 + fase + f*41)*9;
+      const y = CY + soma * env * (0.12 + nivel*0.9) * amp;
+      x === 0 ? cx.moveTo(x, y) : cx.lineTo(x, y);
+    }
+    cx.stroke();
+  }
+  // régua central
+  cx.globalAlpha = .25; cx.lineWidth = 1; cx.shadowBlur = 0;
+  cx.setLineDash([2, 10]);
+  cx.beginPath(); cx.moveTo(0, CY); cx.lineTo(W, CY); cx.stroke();
+  cx.setLineDash([]);
+  // círculo de energia central
+  cx.globalAlpha = .5 + nivel*.5;
+  cx.lineWidth = 2; cx.shadowBlur = 16;
+  cx.beginPath(); cx.arc(CX, CY, 34 + nivel*26 + Math.sin(t*3)*3, 0, Math.PI*2);
+  cx.stroke();
+  cx.restore();
+}
+
+/* ============== TEMA: rosto (o holograma com rosto) ============== */
 const PERFIL = [
   [0,-190],[52,-186],[96,-166],[126,-128],[138,-84],[140,-38],[134,8],
   [122,52],[118,92],[104,128],[76,152],[40,166],[0,172]
 ];
 function pontosCabeca(t) {
-  const ond = (i)=> Math.sin(t*0.8 + i*0.9)*1.5;   // respiração sutil
+  const ond = (i)=> Math.sin(t*0.8 + i*0.9)*1.5;
   const pts = [];
   PERFIL.forEach(([x,y],i)=> pts.push([CX + x + (x?ond(i):0), CY + y]));
   for (let i = PERFIL.length-2; i>0; i--) {
@@ -1229,7 +1363,7 @@ function pontosCabeca(t) {
   }
   return pts;
 }
-function caminhoCabeca(t) {                        // curva suave pelos pontos
+function caminhoCabeca(t) {
   const p = pontosCabeca(t), n = p.length;
   cx.beginPath();
   cx.moveTo((p[0][0]+p[n-1][0])/2, (p[0][1]+p[n-1][1])/2);
@@ -1239,108 +1373,60 @@ function caminhoCabeca(t) {                        // curva suave pelos pontos
   }
   cx.closePath();
 }
-
 function olho(lado, t, cor) {
   const ex = CX + lado*56, ey = CY - 40;
-  let abertura = 1;
-  const ciclo = (t*1000) % 4200;                 // pisca a cada ~4,2 s
-  if (ciclo < 130) abertura = Math.abs(Math.sin(ciclo/130*Math.PI));
-  if (estado === "pensando") abertura *= 0.45;   // olhos semicerrados
-  const w = 56, h = Math.max(1.5, 7.5*abertura); // visor: fenda horizontal
-  cx.save();
-  cx.shadowColor = cor; cx.shadowBlur = 26;
-  // fenda com pontas afiladas
+  let ab = 1;
+  const ciclo = (t*1000) % 4200;
+  if (ciclo < 130) ab = Math.abs(Math.sin(ciclo/130*Math.PI));
+  if (estado === "pensando") ab *= 0.45;
+  const w = 56, h = Math.max(1.5, 7.5*ab);
+  cx.save(); cx.shadowColor = cor; cx.shadowBlur = 26;
   const gh = cx.createLinearGradient(ex-w/2, 0, ex+w/2, 0);
   gh.addColorStop(0, "transparent"); gh.addColorStop(.18, cor);
   gh.addColorStop(.5, "#eafaff");   gh.addColorStop(.82, cor);
   gh.addColorStop(1, "transparent");
   cx.fillStyle = gh;
   cx.beginPath(); cx.ellipse(ex, ey, w/2, h, 0, 0, Math.PI*2); cx.fill();
-  // sobrancelha técnica
   cx.strokeStyle = cor; cx.globalAlpha = .5; cx.lineWidth = 1.5;
   cx.beginPath();
   cx.moveTo(ex - lado*w*0.52, ey - 17);
-  cx.lineTo(ex + lado*w*0.34, ey - 18 - abertura*2);
+  cx.lineTo(ex + lado*w*0.34, ey - 18 - ab*2);
   cx.stroke();
-  cx.globalAlpha = 1;
-  if (estado === "pensando") {                    // ponto varrendo a fenda
-    const px = ex + Math.sin(t*3 + lado)*w*0.34;
-    cx.fillStyle = "#eafaff";
-    cx.beginPath(); cx.arc(px, ey, 2.5, 0, Math.PI*2); cx.fill();
-  }
   cx.restore();
 }
-
-function boca(t, cor) {
-  const bx = CX, by = CY + 92, larg = 130;
-  cx.save();
-  cx.strokeStyle = cor; cx.lineWidth = 2.5;
-  cx.shadowColor = cor; cx.shadowBlur = 16;
-  cx.beginPath();
-  const N = 48;
-  for (let i = 0; i <= N; i++) {
-    const x = bx - larg/2 + (larg/N)*i, f = i/N;
-    const env = Math.sin(f*Math.PI);              // amplitude maior no centro
-    let y = by;
-    if (estado === "falando") {
-      y += Math.sin(t*14 + i*0.9)*14*env + Math.sin(t*31 + i*1.7)*6*env;
-    } else if (estado === "ouvindo") {
-      y += Math.sin(t*3 + i*0.5)*2.2*env;
-    } else if (estado === "pensando") {
-      y += Math.sin(i*0.7 + t)*1.2*env;
-    }
-    i===0 ? cx.moveTo(x,y) : cx.lineTo(x,y);
-  }
-  cx.stroke(); cx.restore();
-}
-
-function aneis(t, cor) {
-  cx.save(); cx.translate(CX, CY);
-  [[236, .10, t*0.25], [258, .07, -t*0.18]].forEach(([r, alfa, rot], k) => {
-    cx.save(); cx.rotate(rot);
-    cx.strokeStyle = cor; cx.globalAlpha = alfa + (estado!=="espera"?0.06:0);
-    cx.lineWidth = k ? 1 : 2;
-    for (let i = 0; i < 24; i++) {                // anel segmentado
-      const a0 = (i/24)*Math.PI*2, a1 = a0 + Math.PI*2/24*0.62;
-      cx.beginPath(); cx.arc(0, 0, r, a0, a1); cx.stroke();
-    }
-    cx.restore();
-  });
-  cx.restore();
-}
-
-function circuitos(t, cor) {                       // marcas na lateral do rosto
-  cx.save(); cx.strokeStyle = cor; cx.globalAlpha = .35; cx.lineWidth = 1;
-  [-1, 1].forEach(s => {
-    for (let i = 0; i < 5; i++) {
-      const y = CY - 60 + i*34, x = CX + s*(150 + Math.sin(t + i)*3);
-      cx.beginPath(); cx.moveTo(x, y); cx.lineTo(x + s*16, y);
-      cx.lineTo(x + s*16, y + 10); cx.stroke();
-    }
-  });
-  cx.restore();
-}
-
-function desenhar(ts) {
-  const t = ts/1000, cor = CORES[estado];
-  cx.clearRect(0, 0, W, H);
-  aneis(t, cor);
-  // cabeça holográfica: contorno duplo com brilho
+function desenharRosto(t, cor) {
   cx.save();
   cx.shadowColor = cor; cx.shadowBlur = 18;
   cx.strokeStyle = cor; cx.lineWidth = 2; cx.globalAlpha = .9;
   caminhoCabeca(t); cx.stroke();
-  cx.globalAlpha = .22; cx.lineWidth = 6; cx.shadowBlur = 30;
-  caminhoCabeca(t + .4); cx.stroke();
-  // preenchimento etéreo
   const g = cx.createLinearGradient(0, CY-190, 0, CY+172);
   g.addColorStop(0, cor + "22"); g.addColorStop(1, "transparent");
-  cx.globalAlpha = estado === "espera" ? .25 : .45;
-  cx.fillStyle = g; caminhoCabeca(t); cx.fill();
+  cx.globalAlpha = .3 + nivel*.25; cx.fillStyle = g;
+  caminhoCabeca(t); cx.fill();
   cx.restore();
-  circuitos(t, cor);
   olho(-1, t, cor); olho(1, t, cor);
-  boca(t, cor);
+  // boca-onda
+  cx.save(); cx.strokeStyle = cor; cx.lineWidth = 2.5;
+  cx.shadowColor = cor; cx.shadowBlur = 16;
+  cx.beginPath();
+  const bx = CX, by = CY + 92, larg = 130, N = 48;
+  for (let i = 0; i <= N; i++) {
+    const x = bx - larg/2 + (larg/N)*i, f = i/N, env = Math.sin(f*Math.PI);
+    const y = by + (Math.sin(t*14 + i*0.9)*14 + Math.sin(t*31 + i*1.7)*6) * env * nivel;
+    i === 0 ? cx.moveTo(x, y) : cx.lineTo(x, y);
+  }
+  cx.stroke(); cx.restore();
+}
+
+const TEMAS = { reator: desenharReator, esfera: desenharEsfera,
+                onda: desenharOnda, rosto: desenharRosto };
+let tema = "reator";
+
+function desenhar(ts) {
+  const t = ts/1000, cor = CORES[estado];
+  nivel += (alvoNivel() - nivel) * 0.06;          // transição suave
+  cx.clearRect(0, 0, W, H);
+  (TEMAS[tema] || desenharReator)(t, cor);
   requestAnimationFrame(desenhar);
 }
 requestAnimationFrame(desenhar);
@@ -1353,7 +1439,12 @@ function aplicar(novo, s) {
   document.getElementById("resposta").textContent = s && s.rayman ? s.rayman : "";
 }
 
-const demo = new URLSearchParams(location.search).get("estado");
+const q = new URLSearchParams(location.search);
+if (q.get("tema")) tema = q.get("tema");
+else fetch("/tema.txt").then(r => r.text())
+       .then(x => { if (TEMAS[x.trim()]) tema = x.trim(); }).catch(()=>{});
+
+const demo = q.get("estado");
 if (demo) {
   aplicar(demo, { voce: "qual a previsão do tempo pra amanhã?",
                   rayman: "Céu limpo e vinte e oito graus, senhor. Um dia excelente." });
@@ -1530,7 +1621,7 @@ echo "  rayman                    -> chat por texto (persona RAYMAN, pt-BR)"
 echo "  rayman ask \"pergunta\"     -> pergunta única"
 echo "  rayman-voz                -> conversa por voz (diga 'desligar' pra sair)"
 echo "  rayman-show               -> bata palma 2x: HUD na tela + voz"
-echo "  rayman-hud                -> só o HUD (tela de status ao vivo)"
+echo "  rayman-hud                -> só o HUD; temas: --tema reator|esfera|onda|rosto"
 echo "  rayman-obsidian           -> sincroniza suas notas do Obsidian"
 echo "  rayman-obsidian \"pergunta\" -> pergunta usando as notas"
 echo "  rayman-web \"pergunta\"    -> busca na internet em tempo real"
