@@ -154,7 +154,7 @@ STATE_PATH = os.path.expanduser("~/.openjarvis/rayman/hud_state.json")
 _pipeline = None
 
 
-def estado(status, voce=None, rayman=None):
+def estado(status, voce=None, rayman=None, nivel=None):
     """Grava o estado atual pro HUD (ouvindo | pensando | falando | espera)."""
     dados = {}
     try:
@@ -164,6 +164,7 @@ def estado(status, voce=None, rayman=None):
     except Exception:
         dados = {}
     dados["status"] = status
+    dados["nivel"] = float(nivel) if nivel is not None else 0.0
     if voce is not None:
         dados["voce"] = voce
     if rayman is not None:
@@ -262,11 +263,12 @@ def gravar_e_transcrever(timeout_inicio=12.0, silencio_fim=1.2, max_seg=30.0):
             if not falando_agora:
                 esperado += 0.1
                 mostrar += 0.1
-                if mostrar >= 1.0:  # medidor de nível a cada 1 s
+                if mostrar >= 0.3:  # medidor + nível pro HUD a cada 0,3 s
                     mostrar = 0.0
                     barra = "#" * min(40, int(rms * 2000))
                     print(f"\r[mic {rms:.4f} | limiar {limiar:.4f}] {barra:<40}",
                           end="", flush=True)
+                    estado("ouvindo", nivel=min(1.0, rms * 45))
                 if rms > limiar:
                     print()
                     falando_agora = True
@@ -276,6 +278,8 @@ def gravar_e_transcrever(timeout_inicio=12.0, silencio_fim=1.2, max_seg=30.0):
                     return ""
             else:
                 frames.append(dados.copy())
+                if len(frames) % 3 == 0:
+                    estado("ouvindo", nivel=min(1.0, rms * 45))
                 silencio = silencio + 0.1 if rms <= limiar * 0.8 else 0.0
                 if silencio >= silencio_fim or len(frames) * 0.1 >= max_seg:
                     break
@@ -308,11 +312,22 @@ SAIR = ("desligar", "encerrar", "tchau", "até logo", "pode descansar")
 NOTAS = ("minhas notas", "nas notas", "obsidian", "no vault", "minhas anotações")
 WEB = ("pesquisa", "pesquise", "na internet", "notícia", "noticias", "notícias",
        "hoje", "agora", "atualmente", "cotação", "previsão do tempo")
+VENDAS = ("vendas", "venda", "faturamento", "receita", "estoque", "escritório",
+          "escritorio", "produtos", "vídeos", "videos", "métricas", "metricas",
+          "conversões", "conversoes", "tiktok", "instagram")
 
 
 def perguntar(pergunta, historico):
     contexto = ""
     baixa = pergunta.lower()
+    if any(g in baixa for g in VENDAS):
+        try:
+            from rayman_vendas import contexto_vendas
+            ctx_v = contexto_vendas(pergunta)
+            if ctx_v:
+                contexto += ctx_v[:3500] + "\n\n"
+        except Exception as exc:
+            print(f"[rayman] vendas indisponível: {exc}", file=sys.stderr)
     if any(g in baixa for g in WEB):
         try:
             from rayman_web import buscar
@@ -1162,6 +1177,180 @@ if __name__ == "__main__":
     main()
 PYCL
 
+# ---------- rayman-vendas: Escritório Virtual (Supabase) ----------
+cat > "$RAYMAN_DIR/rayman_vendas.py" <<'PYVD'
+"""RAYMAN + Escritório Virtual: suas vendas por voz (e por texto).
+
+Conecta o RAYMAN ao Supabase do seu sistema multi-agente de vendas
+(produtos, vídeos, métricas e logs dos agentes). Depois de configurado,
+pergunte por voz coisas como "Rayman, como estão as minhas vendas?" ou
+"quantas views os vídeos fizeram hoje?".
+
+Configuração (uma vez — pegue no painel do Supabase, em Settings > API):
+    rayman-vendas --config https://SEU-PROJETO.supabase.co SUA_ANON_KEY
+
+Uso:
+    rayman-vendas                      -> resumo executivo do negócio
+    rayman-vendas "pergunta"           -> pergunta livre sobre os dados
+Por voz, gatilhos como "vendas", "faturamento", "estoque", "escritório",
+"vídeos", "métricas" acionam a consulta automaticamente.
+"""
+import json
+import os
+import subprocess
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+RAYMAN_DIR = os.path.expanduser("~/.openjarvis/rayman")
+CRED_FILE = os.path.join(RAYMAN_DIR, "supabase.json")
+JARVIS = os.path.expanduser("~/.openjarvis/.venv/bin/jarvis")
+
+
+def ler_credenciais():
+    url = os.environ.get("SUPABASE_URL", "")
+    key = os.environ.get("SUPABASE_KEY", "")
+    if url and key:
+        return {"url": url.rstrip("/"), "key": key}
+    if os.path.exists(CRED_FILE):
+        try:
+            return json.load(open(CRED_FILE))
+        except Exception:
+            pass
+    return None
+
+
+def salvar_credenciais(url, key):
+    os.makedirs(RAYMAN_DIR, exist_ok=True)
+    with open(CRED_FILE, "w") as f:
+        json.dump({"url": url.rstrip("/"), "key": key.strip()}, f)
+    os.chmod(CRED_FILE, 0o600)
+    print("Supabase do Escritório Virtual conectado (dados só neste Mac).")
+    print("Teste com: rayman-vendas")
+
+
+def _get(httpx, cred, tabela, params):
+    url = f"{cred['url']}/rest/v1/{tabela}?{params}"
+    r = httpx.get(url, headers={"apikey": cred["key"],
+                                "Authorization": f"Bearer {cred['key']}"},
+                  timeout=15.0)
+    r.raise_for_status()
+    return r.json()
+
+
+def coletar_dados(cred):
+    """Puxa um retrato do negócio: produtos, vídeos, métricas e logs."""
+    import httpx
+    dados = {}
+    dados["produtos"] = _get(httpx, cred, "produtos",
+                             "select=nome,preco,custo,estoque,ativo&order=criado_em.desc&limit=25")
+    dados["videos"] = _get(httpx, cred, "videos",
+                           "select=status,plataforma,criado_em&order=criado_em.desc&limit=40")
+    dados["metricas"] = _get(httpx, cred, "metricas",
+                             "select=plataforma,views,cliques,conversoes,receita,criado_em"
+                             "&order=criado_em.desc&limit=100")
+    dados["logs"] = _get(httpx, cred, "logs_agentes",
+                         "select=agente,acao,criado_em&order=criado_em.desc&limit=8")
+    return dados
+
+
+def montar_contexto(dados):
+    """Resume os dados num contexto compacto pro modelo."""
+    linhas = ["DADOS AO VIVO DO ESCRITÓRIO VIRTUAL (Supabase):"]
+
+    produtos = dados.get("produtos", [])
+    ativos = [p for p in produtos if p.get("ativo")]
+    linhas.append(f"\nPRODUTOS ({len(ativos)} ativos de {len(produtos)}):")
+    for p in produtos[:10]:
+        margem = ""
+        try:
+            if p.get("preco") and p.get("custo"):
+                margem = f", margem R${float(p['preco']) - float(p['custo']):.2f}"
+        except Exception:
+            pass
+        linhas.append(f"- {p.get('nome')}: preço R${p.get('preco')}, "
+                      f"estoque {p.get('estoque')}{margem}, "
+                      f"{'ativo' if p.get('ativo') else 'inativo'}")
+
+    videos = dados.get("videos", [])
+    por_status = {}
+    for v in videos:
+        por_status[v.get("status", "?")] = por_status.get(v.get("status", "?"), 0) + 1
+    linhas.append(f"\nVÍDEOS ({len(videos)} recentes): "
+                  + ", ".join(f"{k}: {n}" for k, n in por_status.items()))
+
+    met = dados.get("metricas", [])
+    tot = {"views": 0, "cliques": 0, "conversoes": 0, "receita": 0.0}
+    por_plataforma = {}
+    for m in met:
+        for c in ("views", "cliques", "conversoes"):
+            tot[c] += int(m.get(c) or 0)
+        tot["receita"] += float(m.get("receita") or 0)
+        pl = m.get("plataforma") or "?"
+        pp = por_plataforma.setdefault(pl, {"views": 0, "receita": 0.0})
+        pp["views"] += int(m.get("views") or 0)
+        pp["receita"] += float(m.get("receita") or 0)
+    linhas.append(f"\nMÉTRICAS (últimos {len(met)} registros): "
+                  f"{tot['views']} views, {tot['cliques']} cliques, "
+                  f"{tot['conversoes']} conversões, receita R${tot['receita']:.2f}")
+    for pl, v in por_plataforma.items():
+        linhas.append(f"- {pl}: {v['views']} views, R${v['receita']:.2f}")
+
+    logs = dados.get("logs", [])
+    if logs:
+        linhas.append("\nÚLTIMAS AÇÕES DOS AGENTES:")
+        for lg in logs[:5]:
+            linhas.append(f"- {lg.get('agente')}: {lg.get('acao')} ({lg.get('criado_em', '')[:16]})")
+    return "\n".join(linhas)
+
+
+def contexto_vendas(pergunta=""):
+    """Contexto pronto pra injetar no prompt; '' se não configurado/falhar."""
+    cred = ler_credenciais()
+    if not cred:
+        return ""
+    try:
+        return montar_contexto(coletar_dados(cred))
+    except Exception as exc:
+        print(f"[rayman] escritório virtual indisponível: {exc}", file=sys.stderr)
+        return ""
+
+
+def perguntar(pergunta):
+    import re
+    ctx = contexto_vendas()
+    if not ctx:
+        print("Não consegui acessar o Supabase. Configure com:\n"
+              "  rayman-vendas --config https://SEU-PROJETO.supabase.co SUA_ANON_KEY")
+        sys.exit(1)
+    prompt = (ctx + "\n\nCom base SOMENTE nos dados acima, responda ao Julio "
+              "de forma direta e falada, com os números principais: " + pergunta)
+    out = subprocess.run([JARVIS, "--quiet", "ask", "--no-stream", prompt],
+                         capture_output=True, text=True, timeout=300)
+    resposta = re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "", out.stdout).strip()
+    print(resposta or out.stderr.strip()[-300:])
+    return resposta
+
+
+def main():
+    args = sys.argv[1:]
+    if args and args[0] == "--config":
+        if len(args) < 3:
+            print("Uso: rayman-vendas --config https://SEU-PROJETO.supabase.co SUA_ANON_KEY")
+            sys.exit(1)
+        salvar_credenciais(args[1], args[2])
+        return
+    if args:
+        perguntar(" ".join(args))
+    else:
+        perguntar("faça um resumo executivo do negócio agora: produtos, vídeos, "
+                  "métricas e o que merece minha atenção hoje")
+
+
+if __name__ == "__main__":
+    main()
+PYVD
+
 # ---------- HUD (página) ----------
 cat > "$RAYMAN_DIR/hud.html" <<'HTMLHUD'
 <!DOCTYPE html>
@@ -1235,9 +1424,10 @@ const W = cv.width, H = cv.height, CX = W/2, CY = H/2 - 10;
 
 /* intensidade 0..1 por estado (anima transições) */
 let nivel = 0;
+let nivelMic = 0;
 function alvoNivel() {
   return estado === "falando" ? 1 : estado === "pensando" ? .6
-       : estado === "ouvindo" ? .35 : .12;
+       : estado === "ouvindo" ? .2 + nivelMic*.8 : .12;
 }
 
 /* ============== TEMA: reator (anéis do reator arc) ============== */
@@ -1282,8 +1472,8 @@ function desenharReator(t, cor) {
 
 /* ============== TEMA: esfera (holograma de partículas) ============== */
 const PONTOS = [];
-for (let i = 0; i < 420; i++) {           // espiral de Fibonacci na esfera
-  const y = 1 - (i/419)*2, r = Math.sqrt(1 - y*y), a = i*2.39996;
+for (let i = 0; i < 920; i++) {           // espiral de Fibonacci na esfera
+  const y = 1 - (i/919)*2, r = Math.sqrt(1 - y*y), a = i*2.39996;
   PONTOS.push([Math.cos(a)*r, y, Math.sin(a)*r]);
 }
 function desenharEsfera(t, cor) {
@@ -1299,14 +1489,18 @@ function desenharEsfera(t, cor) {
   cx.strokeStyle = cor; cx.globalAlpha = .35; cx.lineWidth = 1;
   cx.beginPath(); cx.ellipse(0, 0, R*1.25, R*0.32, -0.18, 0, Math.PI*2); cx.stroke();
   cx.globalAlpha = 1;
-  for (const [x0,y0,z0] of PONTOS) {
+  for (let i = 0; i < PONTOS.length; i++) {
+    const [x0,y0,z0] = PONTOS[i];
     // rotação Y depois X
     let x = x0*Math.cos(ry) + z0*Math.sin(ry);
     let z = -x0*Math.sin(ry) + z0*Math.cos(ry);
     let y = y0*Math.cos(rx) - z*Math.sin(rx);
     z = y0*Math.sin(rx) + z*Math.cos(rx);
+    // a "voz" empurra cada partícula pra fora, como som numa membrana
+    const voz = 1 + nivel * 0.22 * Math.sin(t*11 + i*0.37)
+                  + nivel * 0.10 * Math.sin(t*23 + i*1.13);
     const persp = 1.6/(1.6 + z);           // z em [-1,1]
-    const px = x*R*persp, py = y*R*persp;
+    const px = x*R*voz*persp, py = y*R*voz*persp;
     const frente = (1 - z)/2;              // 0 atrás .. 1 na frente
     const tam = (0.8 + frente*1.8) * (1 + nivel*.5);
     cx.globalAlpha = 0.12 + frente*0.75;
@@ -1433,6 +1627,7 @@ requestAnimationFrame(desenhar);
 
 function aplicar(novo, s) {
   estado = novo;
+  nivelMic = s && typeof s.nivel === "number" ? Math.min(1, s.nivel) : 0;
   document.documentElement.style.setProperty("--cor", CORES[novo]);
   document.getElementById("status").textContent = ROTULOS[novo];
   document.getElementById("voce").textContent = s && s.voce ? "“"+s.voce+"”" : "";
@@ -1506,13 +1701,18 @@ cat > "$BIN_DIR/rayman-claude" <<WRAP
 #!/usr/bin/env bash
 exec "$VENV/bin/python" "$RAYMAN_DIR/rayman_claude.py" "\$@"
 WRAP
+cat > "$BIN_DIR/rayman-vendas" <<WRAP
+#!/usr/bin/env bash
+[[ -f "$HOME/.openjarvis/rayman/anthropic_key.txt" ]] && export ANTHROPIC_API_KEY="\$(cat "$HOME/.openjarvis/rayman/anthropic_key.txt")"
+exec "$VENV/bin/python" "$RAYMAN_DIR/rayman_vendas.py" "\$@"
+WRAP
 cat > "$BIN_DIR/rayman-obsidian" <<WRAP
 #!/usr/bin/env bash
 [[ -f "$HOME/.openjarvis/rayman/anthropic_key.txt" ]] && export ANTHROPIC_API_KEY="\$(cat "$HOME/.openjarvis/rayman/anthropic_key.txt")"
 exec "$VENV/bin/python" "$RAYMAN_DIR/rayman_obsidian.py" "\$@"
 WRAP
 chmod +x "$BIN_DIR/rayman" "$BIN_DIR/rayman-voz" "$BIN_DIR/rayman-show" \
-         "$BIN_DIR/rayman-hud" "$BIN_DIR/rayman-obsidian" "$BIN_DIR/rayman-web" "$BIN_DIR/rayman-telegram" "$BIN_DIR/rayman-whatsapp" "$BIN_DIR/rayman-claude"
+         "$BIN_DIR/rayman-hud" "$BIN_DIR/rayman-obsidian" "$BIN_DIR/rayman-web" "$BIN_DIR/rayman-telegram" "$BIN_DIR/rayman-whatsapp" "$BIN_DIR/rayman-claude" "$BIN_DIR/rayman-vendas"
 
 # ------------------------------------------------------------
 # 5b. Interface web em tempo real (rayman start)
@@ -1628,6 +1828,7 @@ echo "  rayman-web \"pergunta\"    -> busca na internet em tempo real"
 echo "  rayman-telegram           -> RAYMAN no Telegram (celular, PC, Apple Watch)"
 echo "  rayman-whatsapp           -> RAYMAN no WhatsApp via Twilio (de qualquer lugar)"
 echo "  rayman-claude CHAVE_API   -> liga o cérebro Claude (opcional, nuvem)"
+echo "  rayman-vendas             -> suas vendas do Escritório Virtual (Supabase)"
 echo "  rayman start              -> chat web em tempo real (http://127.0.0.1:8000)"
 echo
 echo "  Se 'rayman' não for encontrado, abra um terminal novo ou rode:"
