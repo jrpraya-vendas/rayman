@@ -61,6 +61,18 @@ As credenciais ficam só no seu Mac (`~/.openjarvis/rayman/twilio.json`). Mande 
 
 O `rayman-telegram` põe o RAYMAN de plantão no Telegram. Configuração única: no Telegram, fale com o @BotFather, mande `/newbot`, escolha um nome e um usuário pro seu bot; ele te dá um token. Aí rode `rayman-telegram --token SEU_TOKEN` e depois `rayman-telegram` (deixe o terminal aberto e o Mac ligado — `caffeinate -s` em outro terminal impede o Mac de dormir). Mande "oi" pro bot: por segurança, o RAYMAN se tranca no primeiro chat que falar com ele (o seu) e ignora todos os outros. A partir daí você conversa com ele do celular, de qualquer computador, do navegador — e do Apple Watch, respondendo pela notificação do Telegram, inclusive ditando por voz. Os gatilhos valem lá também: "pesquisa..." busca na web, "minhas notas..." consulta o Obsidian.
 
+## Cérebro Claude (opcional — o modo mais inteligente)
+
+Por padrão o RAYMAN pensa com um modelo local pequeno (grátis e privado, mas limitado). Se você quiser respostas no nível do Claude, dá pra ligar o Claude como cérebro dele — vale pra texto, voz, HUD, WhatsApp e Telegram de uma vez:
+
+```bash
+rayman-claude SUA_CHAVE_API          # ativa (modelo haiku, o mais barato)
+rayman-claude --modelo sonnet        # sobe o nível (ou opus, o topo)
+rayman-claude --off                  # volta pro modelo local
+```
+
+A chave sai de console.anthropic.com > API keys (a API é paga por uso, separada da assinatura do app Claude; uso pessoal com haiku costuma dar centavos por dia — acompanhe em console.anthropic.com/usage). A chave fica só no seu Mac, com permissão restrita. Trocas: com Claude ligado, precisa de internet e as conversas vão pra nuvem da Anthropic; desligue a qualquer momento com `--off` que tudo volta a ser 100% local.
+
 ## Vozes
 
 - Padrão (grátis, offline): Kokoro com a voz pt-BR `pf_dora`. Se o Kokoro falhar por qualquer motivo, o RAYMAN cai automaticamente na voz Luciana do próprio macOS.

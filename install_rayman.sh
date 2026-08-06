@@ -1044,6 +1044,97 @@ if __name__ == "__main__":
     main()
 PYWA
 
+# ---------- rayman-claude: cérebro Claude opcional ----------
+cat > "$RAYMAN_DIR/rayman_claude.py" <<'PYCL'
+"""Liga o cérebro Claude (Anthropic) no RAYMAN — ou volta pro modelo local.
+
+Uso:
+    rayman-claude SUA_CHAVE_API        -> ativa o Claude como cérebro
+    rayman-claude --modelo sonnet      -> troca o modelo (haiku|sonnet|opus)
+    rayman-claude --off                -> volta pro modelo local (Ollama)
+    rayman-claude --status             -> mostra o cérebro atual
+
+A chave sai de console.anthropic.com (API keys) e fica SÓ no seu Mac,
+em ~/.openjarvis/rayman/anthropic_key.txt (permissão 600). Vale pra tudo:
+texto, voz, HUD, WhatsApp e Telegram.
+
+Custo (API da Anthropic, paga por uso — separada da assinatura do app):
+haiku é o mais barato e já é excelente; sonnet é o meio-termo; opus é o topo.
+Uso pessoal de chat com haiku costuma dar centavos de dólar por dia.
+"""
+import os
+import subprocess
+import sys
+
+RAYMAN_DIR = os.path.expanduser("~/.openjarvis/rayman")
+KEY_FILE = os.path.join(RAYMAN_DIR, "anthropic_key.txt")
+JARVIS = os.path.expanduser("~/.openjarvis/.venv/bin/jarvis")
+
+MODELOS = {
+    "haiku": "claude-haiku-4-5",
+    "sonnet": "claude-sonnet-4-6",
+    "opus": "claude-opus-4-6",
+}
+
+
+def _config(chave, valor):
+    subprocess.run([JARVIS, "--quiet", "config", "set", chave, valor],
+                   capture_output=True, text=True)
+
+
+def ativar(modelo):
+    _config("engine.default", "cloud")
+    _config("intelligence.default_model", MODELOS[modelo])
+    print(f"Cérebro Claude ativado ({MODELOS[modelo]}).")
+    print("Vale pra rayman, rayman-voz, rayman-show, rayman-whatsapp e rayman-telegram.")
+    print("Voltar pro local a qualquer momento: rayman-claude --off")
+
+
+def main():
+    args = sys.argv[1:]
+    if not args:
+        print(__doc__)
+        return
+    if args[0] == "--status":
+        tem_chave = os.path.exists(KEY_FILE)
+        cfg = subprocess.run([JARVIS, "--quiet", "config", "get", "engine.default"],
+                             capture_output=True, text=True).stdout
+        print(f"chave salva: {'sim' if tem_chave else 'não'} | engine: {cfg.strip() or '?'}")
+        return
+    if args[0] == "--off":
+        _config("engine.default", "ollama")
+        _config("intelligence.default_model", "")
+        print("De volta ao modelo local (Ollama). A chave continua salva;"
+              " religue com: rayman-claude --modelo haiku")
+        return
+    if args[0] == "--modelo":
+        nome = (args[1] if len(args) > 1 else "").lower()
+        if nome not in MODELOS:
+            print("Modelos: haiku (barato), sonnet (meio-termo), opus (topo)")
+            sys.exit(1)
+        if not os.path.exists(KEY_FILE):
+            print("Salve a chave primeiro: rayman-claude SUA_CHAVE_API")
+            sys.exit(1)
+        ativar(nome)
+        return
+    # chave de API
+    chave = args[0].strip()
+    if not chave.startswith("sk-"):
+        print("Isso não parece uma chave da Anthropic (começa com sk-ant-...).")
+        print("Crie a sua em console.anthropic.com > API keys.")
+        sys.exit(1)
+    os.makedirs(RAYMAN_DIR, exist_ok=True)
+    with open(KEY_FILE, "w") as f:
+        f.write(chave)
+    os.chmod(KEY_FILE, 0o600)
+    print("Chave salva (só neste Mac).")
+    ativar("haiku")
+
+
+if __name__ == "__main__":
+    main()
+PYCL
+
 # ---------- HUD (página) ----------
 cat > "$RAYMAN_DIR/hud.html" <<'HTMLHUD'
 <!DOCTYPE html>
@@ -1287,38 +1378,50 @@ HTMLHUD
 cat > "$BIN_DIR/rayman" <<WRAP
 #!/usr/bin/env bash
 # RAYMAN = OpenJarvis com a persona rayman (chat de texto e todos os comandos)
+[[ -f "$HOME/.openjarvis/rayman/anthropic_key.txt" ]] && export ANTHROPIC_API_KEY="\$(cat "$HOME/.openjarvis/rayman/anthropic_key.txt")"
 exec "$VENV/bin/jarvis" "\$@"
 WRAP
 cat > "$BIN_DIR/rayman-voz" <<WRAP
 #!/usr/bin/env bash
+[[ -f "$HOME/.openjarvis/rayman/anthropic_key.txt" ]] && export ANTHROPIC_API_KEY="\$(cat "$HOME/.openjarvis/rayman/anthropic_key.txt")"
 exec "$VENV/bin/python" "$RAYMAN_DIR/rayman_voz.py" "\$@"
 WRAP
 cat > "$BIN_DIR/rayman-show" <<WRAP
 #!/usr/bin/env bash
+[[ -f "$HOME/.openjarvis/rayman/anthropic_key.txt" ]] && export ANTHROPIC_API_KEY="\$(cat "$HOME/.openjarvis/rayman/anthropic_key.txt")"
 exec "$VENV/bin/python" "$RAYMAN_DIR/rayman_show.py" "\$@"
 WRAP
 cat > "$BIN_DIR/rayman-hud" <<WRAP
 #!/usr/bin/env bash
+[[ -f "$HOME/.openjarvis/rayman/anthropic_key.txt" ]] && export ANTHROPIC_API_KEY="\$(cat "$HOME/.openjarvis/rayman/anthropic_key.txt")"
 exec "$VENV/bin/python" "$RAYMAN_DIR/rayman_hud.py" "\$@"
 WRAP
 cat > "$BIN_DIR/rayman-web" <<WRAP
 #!/usr/bin/env bash
+[[ -f "$HOME/.openjarvis/rayman/anthropic_key.txt" ]] && export ANTHROPIC_API_KEY="\$(cat "$HOME/.openjarvis/rayman/anthropic_key.txt")"
 exec "$VENV/bin/python" "$RAYMAN_DIR/rayman_web.py" "\$@"
 WRAP
 cat > "$BIN_DIR/rayman-telegram" <<WRAP
 #!/usr/bin/env bash
+[[ -f "$HOME/.openjarvis/rayman/anthropic_key.txt" ]] && export ANTHROPIC_API_KEY="\$(cat "$HOME/.openjarvis/rayman/anthropic_key.txt")"
 exec "$VENV/bin/python" "$RAYMAN_DIR/rayman_telegram.py" "\$@"
 WRAP
 cat > "$BIN_DIR/rayman-whatsapp" <<WRAP
 #!/usr/bin/env bash
+[[ -f "$HOME/.openjarvis/rayman/anthropic_key.txt" ]] && export ANTHROPIC_API_KEY="\$(cat "$HOME/.openjarvis/rayman/anthropic_key.txt")"
 exec "$VENV/bin/python" "$RAYMAN_DIR/rayman_whatsapp.py" "\$@"
+WRAP
+cat > "$BIN_DIR/rayman-claude" <<WRAP
+#!/usr/bin/env bash
+exec "$VENV/bin/python" "$RAYMAN_DIR/rayman_claude.py" "\$@"
 WRAP
 cat > "$BIN_DIR/rayman-obsidian" <<WRAP
 #!/usr/bin/env bash
+[[ -f "$HOME/.openjarvis/rayman/anthropic_key.txt" ]] && export ANTHROPIC_API_KEY="\$(cat "$HOME/.openjarvis/rayman/anthropic_key.txt")"
 exec "$VENV/bin/python" "$RAYMAN_DIR/rayman_obsidian.py" "\$@"
 WRAP
 chmod +x "$BIN_DIR/rayman" "$BIN_DIR/rayman-voz" "$BIN_DIR/rayman-show" \
-         "$BIN_DIR/rayman-hud" "$BIN_DIR/rayman-obsidian" "$BIN_DIR/rayman-web" "$BIN_DIR/rayman-telegram" "$BIN_DIR/rayman-whatsapp"
+         "$BIN_DIR/rayman-hud" "$BIN_DIR/rayman-obsidian" "$BIN_DIR/rayman-web" "$BIN_DIR/rayman-telegram" "$BIN_DIR/rayman-whatsapp" "$BIN_DIR/rayman-claude"
 
 # ------------------------------------------------------------
 # 5b. Interface web em tempo real (rayman start)
@@ -1362,8 +1465,9 @@ if [[ -f "$RAYMAN_DIR/telegram_token.txt" ]]; then
 <plist version="1.0"><dict>
   <key>Label</key><string>com.rayman.telegram</string>
   <key>ProgramArguments</key><array>
-    <string>$VENV/bin/python</string>
-    <string>$RAYMAN_DIR/rayman_telegram.py</string>
+    <string>/bin/bash</string>
+    <string>-c</string>
+    <string>[ -f "$RAYMAN_DIR/anthropic_key.txt" ] &amp;&amp; export ANTHROPIC_API_KEY="\$(cat "$RAYMAN_DIR/anthropic_key.txt")"; exec "$VENV/bin/python" "$RAYMAN_DIR/rayman_telegram.py"</string>
   </array>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
@@ -1390,8 +1494,9 @@ if [[ -f "$RAYMAN_DIR/twilio.json" ]]; then
 <plist version="1.0"><dict>
   <key>Label</key><string>com.rayman.whatsapp</string>
   <key>ProgramArguments</key><array>
-    <string>$VENV/bin/python</string>
-    <string>$RAYMAN_DIR/rayman_whatsapp.py</string>
+    <string>/bin/bash</string>
+    <string>-c</string>
+    <string>[ -f "$RAYMAN_DIR/anthropic_key.txt" ] &amp;&amp; export ANTHROPIC_API_KEY="\$(cat "$RAYMAN_DIR/anthropic_key.txt")"; exec "$VENV/bin/python" "$RAYMAN_DIR/rayman_whatsapp.py"</string>
   </array>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
@@ -1431,6 +1536,7 @@ echo "  rayman-obsidian \"pergunta\" -> pergunta usando as notas"
 echo "  rayman-web \"pergunta\"    -> busca na internet em tempo real"
 echo "  rayman-telegram           -> RAYMAN no Telegram (celular, PC, Apple Watch)"
 echo "  rayman-whatsapp           -> RAYMAN no WhatsApp via Twilio (de qualquer lugar)"
+echo "  rayman-claude CHAVE_API   -> liga o cérebro Claude (opcional, nuvem)"
 echo "  rayman start              -> chat web em tempo real (http://127.0.0.1:8000)"
 echo
 echo "  Se 'rayman' não for encontrado, abra um terminal novo ou rode:"
