@@ -286,8 +286,14 @@ def gravar_e_transcrever(timeout_inicio=12.0, silencio_fim=1.2, max_seg=30.0):
 
     estado("pensando")
     audio = np.concatenate(frames).flatten()
-    segs, _ = _whisper().transcribe(audio, language="pt", beam_size=1,
-                                    vad_filter=True)
+    vocabulario = ("Conversa com o RAYMAN, assistente pessoal do Julio. "
+                   "Temas: vendas, faturamento, estoque, pedidos, Bling, "
+                   "Supabase, Escritório Virtual, Mercado Livre, TikTok, "
+                   "Instagram, Obsidian, Claude, pesquisa na internet.")
+    segs, _ = _whisper().transcribe(audio, language="pt",
+                                    beam_size=5, vad_filter=True,
+                                    initial_prompt=vocabulario,
+                                    condition_on_previous_text=False)
     return " ".join(s.text.strip() for s in segs).strip()
 PYVOICE
 
@@ -312,9 +318,10 @@ SAIR = ("desligar", "encerrar", "tchau", "até logo", "pode descansar")
 NOTAS = ("minhas notas", "nas notas", "obsidian", "no vault", "minhas anotações")
 WEB = ("pesquisa", "pesquise", "na internet", "notícia", "noticias", "notícias",
        "hoje", "agora", "atualmente", "cotação", "previsão do tempo")
-VENDAS = ("vendas", "venda", "faturamento", "receita", "estoque", "escritório",
-          "escritorio", "produtos", "vídeos", "videos", "métricas", "metricas",
-          "conversões", "conversoes", "tiktok", "instagram")
+VENDAS = ("vendas", "venda", "vendi", "faturamento", "faturei", "receita",
+          "estoque", "escritório", "escritorio", "produtos", "métricas",
+          "metricas", "conversões", "conversoes", "tiktok", "instagram",
+          "pedido", "pedidos", "bling", "blink", "blin")
 
 
 def perguntar(pergunta, historico):
@@ -322,10 +329,16 @@ def perguntar(pergunta, historico):
     baixa = pergunta.lower()
     if any(g in baixa for g in VENDAS):
         try:
+            import os as _os
             from rayman_bling import contexto_bling
             ctx_b = contexto_bling()
             if ctx_b:
                 contexto += ctx_b[:3000] + "\n\n"
+            elif _os.path.exists(_os.path.expanduser(
+                    "~/.openjarvis/rayman/bling.json")):
+                return ("Não consegui puxar os dados do Bling agora, senhor. "
+                        "Rode rayman-bling --testar no terminal, que eu te "
+                        "mostro exatamente onde está travando.")
         except Exception as exc:
             print(f"[rayman] bling indisponível: {exc}", file=sys.stderr)
         try:
@@ -1655,6 +1668,11 @@ def contexto_bling(dias=7):
         pedidos, produtos, hoje = coletar(httpx, tk, dias)
     except Exception as exc:
         print(f"[rayman] Bling indisponível: {exc}", file=sys.stderr)
+        try:
+            with open(os.path.join(RAYMAN_DIR, "erro.log"), "a") as f:
+                f.write(f"BLING: {exc}\n---\n")
+        except Exception:
+            pass
         return ""
 
     linhas = [f"VENDAS REAIS DO BLING (fonte oficial — últimos {dias} dias):"]
@@ -1704,10 +1722,48 @@ def perguntar(pergunta):
     return resposta
 
 
+def testar():
+    """Diagnóstico passo a passo da conexão com o Bling."""
+    import httpx
+    cred = _ler()
+    if not cred:
+        print("1. credenciais: NÃO CONFIGURADAS")
+        print("   rode: rayman-bling --config CLIENT_ID CLIENT_SECRET REFRESH_TOKEN")
+        return
+    modo = "client_id+refresh (renova sozinho)" if cred.get("client_id") else "token simples (expira ~6h)"
+    print(f"1. credenciais: ok ({modo})")
+    tk = token(httpx)
+    if not tk:
+        print("2. token: FALHOU — veja a mensagem de erro acima.")
+        print("   Causa comum: refresh_token errado/expirado, ou client_id e")
+        print("   client_secret trocados. Refaça o --config na ordem certa.")
+        return
+    print(f"2. token: ok (começa com {tk[:8]}...)")
+    for nome, caminho, params in (
+        ("pedidos de venda", "/pedidos/vendas", "limite=5"),
+        ("produtos", "/produtos", "limite=5"),
+    ):
+        try:
+            r = httpx.get(f"{API}{caminho}?{params}",
+                          headers={"Authorization": f"Bearer {tk}",
+                                   "Accept": "application/json"}, timeout=20.0)
+            n = len(r.json().get("data", [])) if r.status_code < 300 else 0
+            print(f"3. {nome}: HTTP {r.status_code}, {n} registro(s) na amostra")
+            if r.status_code >= 300:
+                print("   resposta:", r.text[:300])
+        except Exception as exc:
+            print(f"3. {nome}: ERRO {exc}")
+    print("\nSe os passos deram ok mas com 0 pedidos, confira no painel do")
+    print("Bling se os pedidos estão como 'pedido de venda' (não orçamento).")
+
+
 def main():
     args = sys.argv[1:]
     if args and args[0] in ("--help", "-h"):
         print(__doc__)
+        return
+    if args and args[0] == "--testar":
+        testar()
         return
     if args and args[0] == "--config":
         if len(args) < 4:
