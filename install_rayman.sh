@@ -328,28 +328,29 @@ def perguntar(pergunta, historico):
     contexto = ""
     baixa = pergunta.lower()
     if any(g in baixa for g in VENDAS):
-        try:
-            import os as _os
-            from rayman_bling import contexto_bling
-            ctx_b = contexto_bling()
-            if ctx_b:
-                contexto += ctx_b[:3000] + "\n\n"
-            elif _os.path.exists(_os.path.expanduser(
-                    "~/.openjarvis/rayman/bling.json")):
-                return ("Não consegui puxar os dados do Bling agora, senhor. "
-                        "Rode rayman-bling --testar no terminal, que eu te "
-                        "mostro exatamente onde está travando.")
-        except Exception as exc:
-            print(f"[rayman] bling indisponível: {exc}", file=sys.stderr)
+        import os as _os
         try:
             from rayman_vendas import contexto_vendas
             ctx_v = contexto_vendas(pergunta)
             if ctx_v:
-                rotulo = ("DADOS DE MARKETING (Supabase do Escritório Virtual — "
-                          "vídeos e métricas; NÃO são as vendas oficiais):\n")
-                contexto += rotulo + ctx_v[:2500] + "\n\n"
+                contexto += ctx_v[:4000] + "\n\n"
+            elif _os.path.exists(_os.path.expanduser(
+                    "~/.openjarvis/rayman/supabase.json")):
+                return ("Não consegui acessar o Escritório Virtual agora, "
+                        "senhor. Rode rayman-vendas --testar no terminal, "
+                        "que eu te mostro exatamente onde está travando.")
         except Exception as exc:
-            print(f"[rayman] vendas indisponível: {exc}", file=sys.stderr)
+            print(f"[rayman] escritório indisponível: {exc}", file=sys.stderr)
+        # Bling é opcional: só entra se estiver configurado
+        try:
+            if _os.path.exists(_os.path.expanduser(
+                    "~/.openjarvis/rayman/bling.json")):
+                from rayman_bling import contexto_bling
+                ctx_b = contexto_bling()
+                if ctx_b:
+                    contexto += ctx_b[:2000] + "\n\n"
+        except Exception as exc:
+            print(f"[rayman] bling indisponível: {exc}", file=sys.stderr)
     if any(g in baixa for g in WEB):
         try:
             from rayman_web import buscar
@@ -1232,21 +1233,20 @@ PYCL
 
 # ---------- rayman-vendas: Escritório Virtual (Supabase) ----------
 cat > "$RAYMAN_DIR/rayman_vendas.py" <<'PYVD'
-"""RAYMAN + Escritório Virtual: suas vendas por voz (e por texto).
+"""RAYMAN + Escritório Virtual: TODOS os dados do seu sistema, por voz.
 
-Conecta o RAYMAN ao Supabase do seu sistema multi-agente de vendas
-(produtos, vídeos, métricas e logs dos agentes). Depois de configurado,
-pergunte por voz coisas como "Rayman, como estão as minhas vendas?" ou
-"quantas views os vídeos fizeram hoje?".
+Fonte oficial do negócio. O conector descobre sozinho as tabelas que
+existem no seu Supabase (produtos, vendas, pedidos, métricas, o que
+houver) e lê os dados reais — sem depender de um schema fixo.
 
-Configuração (uma vez — pegue no painel do Supabase, em Settings > API):
+Configuração (uma vez — painel do Supabase, Settings > API):
     rayman-vendas --config https://SEU-PROJETO.supabase.co SUA_ANON_KEY
 
 Uso:
-    rayman-vendas                      -> resumo executivo do negócio
-    rayman-vendas "pergunta"           -> pergunta livre sobre os dados
-Por voz, gatilhos como "vendas", "faturamento", "estoque", "escritório",
-"vídeos", "métricas" acionam a consulta automaticamente.
+    rayman-vendas                -> resumo executivo do negócio
+    rayman-vendas "pergunta"     -> pergunta livre sobre os dados
+    rayman-vendas --testar       -> lista as tabelas e quantos registros há
+Por voz: "minhas vendas", "faturamento", "estoque", "pedidos"...
 """
 import json
 import os
@@ -1258,6 +1258,11 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 RAYMAN_DIR = os.path.expanduser("~/.openjarvis/rayman")
 CRED_FILE = os.path.join(RAYMAN_DIR, "supabase.json")
 JARVIS = os.path.expanduser("~/.openjarvis/.venv/bin/jarvis")
+
+# tabelas mais relevantes primeiro quando existirem
+PRIORIDADE = ("vendas", "pedidos", "pedido", "orders", "faturamento",
+              "clientes", "produtos", "estoque", "metricas", "videos",
+              "logs_agentes")
 
 
 def ler_credenciais():
@@ -1279,81 +1284,99 @@ def salvar_credenciais(url, key):
         json.dump({"url": url.rstrip("/"), "key": key.strip()}, f)
     os.chmod(CRED_FILE, 0o600)
     print("Supabase do Escritório Virtual conectado (dados só neste Mac).")
-    print("Teste com: rayman-vendas")
+    print("Veja o que ele enxerga: rayman-vendas --testar")
 
 
-def _get(httpx, cred, tabela, params):
-    url = f"{cred['url']}/rest/v1/{tabela}?{params}"
-    r = httpx.get(url, headers={"apikey": cred["key"],
-                                "Authorization": f"Bearer {cred['key']}"},
+def _headers(cred, extra=None):
+    h = {"apikey": cred["key"], "Authorization": f"Bearer {cred['key']}"}
+    if extra:
+        h.update(extra)
+    return h
+
+
+def descobrir_tabelas(httpx, cred):
+    """Lista as tabelas expostas pela API do Supabase (OpenAPI)."""
+    r = httpx.get(f"{cred['url']}/rest/v1/", headers=_headers(cred),
                   timeout=15.0)
     r.raise_for_status()
-    return r.json()
+    spec = r.json()
+    tabelas = [t for t in spec.get("definitions", {}) if not t.startswith("_")]
+    # prioridade: vendas/pedidos primeiro, resto depois
+    def chave(t):
+        for i, p in enumerate(PRIORIDADE):
+            if p in t.lower():
+                return (0, i)
+        return (1, t)
+    return sorted(tabelas, key=chave)
 
 
-def coletar_dados(cred):
-    """Puxa um retrato do negócio: produtos, vídeos, métricas e logs."""
-    import httpx
-    dados = {}
-    dados["produtos"] = _get(httpx, cred, "produtos",
-                             "select=nome,preco,custo,estoque,ativo&order=criado_em.desc&limit=25")
-    dados["videos"] = _get(httpx, cred, "videos",
-                           "select=status,plataforma,criado_em&order=criado_em.desc&limit=40")
-    dados["metricas"] = _get(httpx, cred, "metricas",
-                             "select=plataforma,views,cliques,conversoes,receita,criado_em"
-                             "&order=criado_em.desc&limit=100")
-    dados["logs"] = _get(httpx, cred, "logs_agentes",
-                         "select=agente,acao,criado_em&order=criado_em.desc&limit=8")
-    return dados
+def contar(httpx, cred, tabela):
+    r = httpx.get(f"{cred['url']}/rest/v1/{tabela}?select=*&limit=1",
+                  headers=_headers(cred, {"Prefer": "count=exact",
+                                          "Range-Unit": "items",
+                                          "Range": "0-0"}),
+                  timeout=15.0)
+    cr = r.headers.get("content-range", "")
+    try:
+        return int(cr.split("/")[-1])
+    except Exception:
+        return -1
 
 
-def montar_contexto(dados):
-    """Resume os dados num contexto compacto pro modelo."""
-    linhas = ["DADOS AO VIVO DO ESCRITÓRIO VIRTUAL (Supabase):"]
+def amostra(httpx, cred, tabela, limite=8):
+    """Últimos registros da tabela (tenta ordenar por coluna de data)."""
+    for ordem in ("criado_em.desc", "created_at.desc", "data.desc", ""):
+        p = f"select=*&limit={limite}"
+        if ordem:
+            p += f"&order={ordem}"
+        r = httpx.get(f"{cred['url']}/rest/v1/{tabela}?{p}",
+                      headers=_headers(cred), timeout=15.0)
+        if r.status_code < 300:
+            return r.json()
+    return []
 
-    produtos = dados.get("produtos", [])
-    ativos = [p for p in produtos if p.get("ativo")]
-    linhas.append(f"\nPRODUTOS ({len(ativos)} ativos de {len(produtos)}):")
-    for p in produtos[:10]:
-        margem = ""
-        try:
-            if p.get("preco") and p.get("custo"):
-                margem = f", margem R${float(p['preco']) - float(p['custo']):.2f}"
-        except Exception:
-            pass
-        linhas.append(f"- {p.get('nome')}: preço R${p.get('preco')}, "
-                      f"estoque {p.get('estoque')}{margem}, "
-                      f"{'ativo' if p.get('ativo') else 'inativo'}")
 
-    videos = dados.get("videos", [])
-    por_status = {}
-    for v in videos:
-        por_status[v.get("status", "?")] = por_status.get(v.get("status", "?"), 0) + 1
-    linhas.append(f"\nVÍDEOS ({len(videos)} recentes): "
-                  + ", ".join(f"{k}: {n}" for k, n in por_status.items()))
+def _compacta(valor):
+    if isinstance(valor, dict):
+        return json.dumps(valor, ensure_ascii=False)[:60]
+    s = str(valor)
+    return s[:60]
 
-    met = dados.get("metricas", [])
-    tot = {"views": 0, "cliques": 0, "conversoes": 0, "receita": 0.0}
-    por_plataforma = {}
-    for m in met:
-        for c in ("views", "cliques", "conversoes"):
-            tot[c] += int(m.get(c) or 0)
-        tot["receita"] += float(m.get("receita") or 0)
-        pl = m.get("plataforma") or "?"
-        pp = por_plataforma.setdefault(pl, {"views": 0, "receita": 0.0})
-        pp["views"] += int(m.get("views") or 0)
-        pp["receita"] += float(m.get("receita") or 0)
-    linhas.append(f"\nMÉTRICAS (últimos {len(met)} registros): "
-                  f"{tot['views']} views, {tot['cliques']} cliques, "
-                  f"{tot['conversoes']} conversões, receita R${tot['receita']:.2f}")
-    for pl, v in por_plataforma.items():
-        linhas.append(f"- {pl}: {v['views']} views, R${v['receita']:.2f}")
 
-    logs = dados.get("logs", [])
-    if logs:
-        linhas.append("\nÚLTIMAS AÇÕES DOS AGENTES:")
-        for lg in logs[:5]:
-            linhas.append(f"- {lg.get('agente')}: {lg.get('acao')} ({lg.get('criado_em', '')[:16]})")
+def montar_contexto(httpx, cred, max_tabelas=8):
+    linhas = ["DADOS AO VIVO DO ESCRITÓRIO VIRTUAL (fonte oficial do negócio):"]
+    tabelas = descobrir_tabelas(httpx, cred)
+    if not tabelas:
+        return ""
+    for t in tabelas[:max_tabelas]:
+        n = contar(httpx, cred, t)
+        regs = amostra(httpx, cred, t)
+        linhas.append(f"\nTABELA {t} ({n if n >= 0 else '?'} registros; "
+                      f"últimos {len(regs)}):")
+        if not regs:
+            linhas.append("- (vazia)")
+            continue
+        # soma colunas numéricas que parecem dinheiro/quantidade
+        somas = {}
+        for reg in regs:
+            for k, v in reg.items():
+                if isinstance(v, (int, float)) and any(
+                        p in k.lower() for p in ("total", "receita", "valor",
+                                                 "preco", "views", "converso",
+                                                 "clique", "estoque", "quant")):
+                    somas[k] = somas.get(k, 0) + v
+        for reg in regs[:5]:
+            campos = []
+            for k, v in list(reg.items()):
+                if v in (None, "", [], {}) or k in ("id",) or str(k).endswith("_id"):
+                    continue
+                campos.append(f"{k}={_compacta(v)}")
+                if len(campos) >= 6:
+                    break
+            linhas.append("- " + " | ".join(campos))
+        if somas:
+            linhas.append("  somas da amostra: "
+                          + ", ".join(f"{k}={v}" for k, v in somas.items()))
     return "\n".join(linhas)
 
 
@@ -1363,21 +1386,51 @@ def contexto_vendas(pergunta=""):
     if not cred:
         return ""
     try:
-        return montar_contexto(coletar_dados(cred))
+        import httpx
+        return montar_contexto(httpx, cred)
     except Exception as exc:
         print(f"[rayman] escritório virtual indisponível: {exc}", file=sys.stderr)
+        try:
+            with open(os.path.join(RAYMAN_DIR, "erro.log"), "a") as f:
+                f.write(f"SUPABASE: {exc}\n---\n")
+        except Exception:
+            pass
         return ""
+
+
+def testar():
+    cred = ler_credenciais()
+    if not cred:
+        print("1. credenciais: NÃO CONFIGURADAS")
+        print("   rode: rayman-vendas --config URL ANON_KEY")
+        return
+    print(f"1. credenciais: ok ({cred['url']})")
+    import httpx
+    try:
+        tabelas = descobrir_tabelas(httpx, cred)
+    except Exception as exc:
+        print(f"2. conexão: FALHOU — {exc}")
+        return
+    print(f"2. conexão: ok — {len(tabelas)} tabela(s) visíveis")
+    for t in tabelas:
+        n = contar(httpx, cred, t)
+        print(f"   - {t}: {n if n >= 0 else '?'} registro(s)")
+    print("\nSe uma tabela que deveria ter dados aparece com 0 registros,")
+    print("a causa comum é RLS (Row Level Security) bloqueando a anon key —")
+    print("no painel do Supabase, crie uma policy de SELECT pra 'anon'.")
 
 
 def perguntar(pergunta):
     import re
     ctx = contexto_vendas()
     if not ctx:
-        print("Não consegui acessar o Supabase. Configure com:\n"
-              "  rayman-vendas --config https://SEU-PROJETO.supabase.co SUA_ANON_KEY")
+        print("Não consegui acessar o Escritório Virtual."
+              " Rode: rayman-vendas --testar")
         sys.exit(1)
     prompt = (ctx + "\n\nCom base SOMENTE nos dados acima, responda ao Julio "
-              "de forma direta e falada, com os números principais: " + pergunta)
+              "de forma direta e falada, com os números principais. Se a "
+              "informação não estiver nos dados, diga qual tabela está vazia: "
+              + pergunta)
     out = subprocess.run([JARVIS, "--quiet", "ask", "--no-stream", prompt],
                          capture_output=True, text=True, timeout=300)
     resposta = re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "", out.stdout).strip()
@@ -1393,11 +1446,14 @@ def main():
             sys.exit(1)
         salvar_credenciais(args[1], args[2])
         return
+    if args and args[0] == "--testar":
+        testar()
+        return
     if args:
         perguntar(" ".join(args))
     else:
-        perguntar("faça um resumo executivo do negócio agora: produtos, vídeos, "
-                  "métricas e o que merece minha atenção hoje")
+        perguntar("faça um resumo executivo do negócio agora: vendas, produtos, "
+                  "estoque e o que merece minha atenção hoje")
 
 
 if __name__ == "__main__":
@@ -2363,7 +2419,7 @@ echo "  rayman-telegram           -> RAYMAN no Telegram (celular, PC, Apple Watc
 echo "  rayman-whatsapp           -> RAYMAN no WhatsApp via Twilio (de qualquer lugar)"
 echo "  rayman-claude CHAVE_API   -> liga o cérebro Claude (opcional, nuvem)"
 echo "  rayman-bling              -> vendas REAIS e estoque do Bling ERP"
-echo "  rayman-vendas             -> métricas de marketing (Supabase)"
+echo "  rayman-vendas             -> seus dados do WeStack/Escritório (descobre as tabelas sozinho)"
 echo "  rayman-conectar           -> liga TUDO de uma vez (Claude, vendas, WhatsApp)"
 echo "  rayman start              -> chat web em tempo real (http://127.0.0.1:8000)"
 echo
