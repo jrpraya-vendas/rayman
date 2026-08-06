@@ -321,7 +321,8 @@ WEB = ("pesquisa", "pesquise", "na internet", "notícia", "noticias", "notícias
 VENDAS = ("vendas", "venda", "vendi", "faturamento", "faturei", "receita",
           "estoque", "escritório", "escritorio", "produtos", "métricas",
           "metricas", "conversões", "conversoes", "tiktok", "instagram",
-          "pedido", "pedidos", "bling", "blink", "blin")
+          "pedido", "pedidos", "bling", "blink", "blin", "mercado livre",
+          "mercadolivre", "meli")
 
 
 def perguntar(pergunta, historico):
@@ -329,6 +330,19 @@ def perguntar(pergunta, historico):
     baixa = pergunta.lower()
     if any(g in baixa for g in VENDAS):
         import os as _os
+        try:
+            if _os.path.exists(_os.path.expanduser(
+                    "~/.openjarvis/rayman/mercadolivre.json")):
+                from rayman_ml import contexto_ml
+                ctx_m = contexto_ml()
+                if ctx_m:
+                    contexto += ctx_m[:3000] + "\n\n"
+                else:
+                    return ("Não consegui acessar o Mercado Livre agora, "
+                            "senhor. Rode rayman-ml --testar no terminal, "
+                            "que eu te mostro onde está travando.")
+        except Exception as exc:
+            print(f"[rayman] mercado livre indisponível: {exc}", file=sys.stderr)
         try:
             from rayman_vendas import contexto_vendas
             ctx_v = contexto_vendas(pergunta)
@@ -1932,6 +1946,340 @@ if __name__ == "__main__":
     main()
 PYBL
 
+# ---------- rayman-ml: vendas reais (Mercado Livre) ----------
+cat > "$RAYMAN_DIR/rayman_ml.py" <<'PYML'
+"""RAYMAN + Mercado Livre: suas vendas REAIS, direto da fonte.
+
+Conecta na API oficial do Mercado Livre com a SUA conta de vendedor.
+Depois de autorizado uma vez, o RAYMAN renova o acesso sozinho e responde
+por voz: pedidos de hoje, faturamento da semana, o que vendeu, status.
+
+Configuração (uma vez):
+  1. Acesse developers.mercadolivre.com.br > Suas integrações > Criar aplicação
+     - Nome: RAYMAN (ou o que quiser)
+     - URI de redirect: https://localhost:8798/callback
+     - Escopos: read (offline_access marcado, pra renovar sozinho)
+  2. Copie o App ID (client_id) e a Secret Key e rode:
+         rayman-ml --config APP_ID SECRET_KEY
+  3. Autorize no navegador:
+         rayman-ml --autorizar
+     (o navegador vai avisar "conexão não é particular" no localhost —
+      é o esperado: clique em Avançado > Continuar. Se a página não abrir,
+      copie a URL inteira da barra de endereço e rode:
+         rayman-ml --codigo "URL_COLADA")
+
+Uso:
+    rayman-ml                  -> resumo: pedidos e faturamento
+    rayman-ml "pergunta"       -> pergunta livre sobre as vendas
+    rayman-ml --testar         -> diagnóstico passo a passo
+Por voz: "minhas vendas", "pedidos", "mercado livre", "faturamento"...
+"""
+import datetime as dt
+import json
+import os
+import subprocess
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+RAYMAN_DIR = os.path.expanduser("~/.openjarvis/rayman")
+CRED_FILE = os.path.join(RAYMAN_DIR, "mercadolivre.json")
+JARVIS = os.path.expanduser("~/.openjarvis/.venv/bin/jarvis")
+API = "https://api.mercadolibre.com"
+AUTH_URL = "https://auth.mercadolivre.com.br/authorization"
+TOKEN_URL = "https://api.mercadolibre.com/oauth/token"
+REDIRECT = "https://localhost:8798/callback"
+
+
+def _ler():
+    if os.path.exists(CRED_FILE):
+        try:
+            return json.load(open(CRED_FILE))
+        except Exception:
+            pass
+    return {}
+
+
+def _gravar(cred):
+    os.makedirs(RAYMAN_DIR, exist_ok=True)
+    with open(CRED_FILE, "w") as f:
+        json.dump(cred, f)
+    os.chmod(CRED_FILE, 0o600)
+
+
+def _trocar_tokens(httpx, cred, dados_grant):
+    import time
+    payload = {"client_id": cred["client_id"],
+               "client_secret": cred["client_secret"]}
+    payload.update(dados_grant)
+    r = httpx.post(TOKEN_URL, data=payload,
+                   headers={"Accept": "application/json"}, timeout=20.0)
+    if r.status_code >= 300:
+        print(f"[rayman] token do Mercado Livre falhou: {r.text[:300]}",
+              file=sys.stderr)
+        return False
+    novo = r.json()
+    cred["access_token"] = novo.get("access_token", "")
+    if novo.get("refresh_token"):
+        cred["refresh_token"] = novo["refresh_token"]
+    cred["user_id"] = novo.get("user_id", cred.get("user_id", ""))
+    cred["expira_em"] = time.time() + int(novo.get("expires_in", 21600))
+    _gravar(cred)
+    return True
+
+
+def token(httpx):
+    import time
+    cred = _ler()
+    if not cred.get("client_id"):
+        return ""
+    if cred.get("access_token") and time.time() < cred.get("expira_em", 0) - 120:
+        return cred["access_token"]
+    if cred.get("refresh_token"):
+        if _trocar_tokens(httpx, cred, {"grant_type": "refresh_token",
+                                        "refresh_token": cred["refresh_token"]}):
+            return _ler().get("access_token", "")
+    return cred.get("access_token", "")
+
+
+def _extrair_codigo(texto):
+    import urllib.parse
+    texto = texto.strip()
+    if "code=" in texto:
+        q = urllib.parse.parse_qs(urllib.parse.urlparse(texto).query)
+        return q.get("code", [""])[0] or texto.split("code=")[-1].split("&")[0]
+    return texto
+
+
+def usar_codigo(codigo):
+    import httpx
+    cred = _ler()
+    if not cred.get("client_id"):
+        print("Rode antes: rayman-ml --config APP_ID SECRET_KEY")
+        sys.exit(1)
+    codigo = _extrair_codigo(codigo)
+    if _trocar_tokens(httpx, cred, {"grant_type": "authorization_code",
+                                    "code": codigo,
+                                    "redirect_uri": REDIRECT}):
+        print("Mercado Livre autorizado! Teste: rayman-ml --testar")
+    else:
+        print("Não deu — o código pode ter expirado (vale poucos minutos)."
+              " Rode rayman-ml --autorizar de novo.")
+        sys.exit(1)
+
+
+def autorizar():
+    """Abre a autorização; captura o código num servidorzinho https local."""
+    import http.server
+    import ssl
+    import subprocess as sp
+    import tempfile
+    import threading
+    import time
+
+    cred = _ler()
+    if not cred.get("client_id"):
+        print("Rode antes: rayman-ml --config APP_ID SECRET_KEY")
+        sys.exit(1)
+
+    url = (f"{AUTH_URL}?response_type=code&client_id={cred['client_id']}"
+           f"&redirect_uri={REDIRECT}")
+    resultado = {}
+
+    class Callback(http.server.BaseHTTPRequestHandler):
+        def log_message(self, *a):
+            pass
+
+        def do_GET(self):
+            import urllib.parse
+            q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+            if q.get("code"):
+                resultado["code"] = q["code"][0]
+                corpo = "<h2>Pode fechar. RAYMAN conectado ao Mercado Livre.</h2>"
+            else:
+                corpo = "<h2>Não veio o código — tente de novo.</h2>"
+            dados = corpo.encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(dados)))
+            self.end_headers()
+            self.wfile.write(dados)
+
+    servidor = None
+    try:
+        # certificado autoassinado só pro localhost (o ML exige https)
+        pasta = tempfile.mkdtemp()
+        cert, chave = os.path.join(pasta, "c.pem"), os.path.join(pasta, "k.pem")
+        sp.run(["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes",
+                "-keyout", chave, "-out", cert, "-days", "2",
+                "-subj", "/CN=localhost"], capture_output=True, check=True)
+        ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        ctx.load_cert_chain(cert, chave)
+        servidor = http.server.HTTPServer(("127.0.0.1", 8798), Callback)
+        servidor.socket = ctx.wrap_socket(servidor.socket, server_side=True)
+        threading.Thread(target=servidor.serve_forever, daemon=True).start()
+    except Exception as exc:
+        print(f"(sem servidor local: {exc} — use o plano B abaixo)")
+
+    print("Abrindo o navegador pra autorizar no Mercado Livre...")
+    sp.run(["open", url], check=False)
+    print("(se não abrir, cole no navegador:)\n" + url)
+    print("\nO navegador vai avisar que localhost 'não é particular' —")
+    print("clique em Avançado > Continuar. É o seu próprio computador.")
+    print("\nPLANO B: se a página final não carregar, copie a URL inteira da")
+    print('barra de endereço e rode:  rayman-ml --codigo "URL_AQUI"')
+
+    for _ in range(300):
+        if resultado.get("code"):
+            break
+        time.sleep(1)
+    if servidor:
+        servidor.shutdown()
+    if not resultado.get("code"):
+        print("\nNão recebi o código em 5 minutos — use o PLANO B acima.")
+        sys.exit(1)
+    usar_codigo(resultado["code"])
+
+
+def coletar(httpx, tk, dias=7):
+    cred = _ler()
+    uid = cred.get("user_id", "")
+    if not uid:
+        r = httpx.get(f"{API}/users/me",
+                      headers={"Authorization": f"Bearer {tk}"}, timeout=20.0)
+        r.raise_for_status()
+        uid = r.json().get("id", "")
+        cred["user_id"] = uid
+        _gravar(cred)
+    hoje = dt.date.today()
+    desde = (hoje - dt.timedelta(days=dias - 1)).isoformat() + "T00:00:00.000-03:00"
+    r = httpx.get(f"{API}/orders/search?seller={uid}&sort=date_desc&limit=50"
+                  f"&order.date_created.from={desde}",
+                  headers={"Authorization": f"Bearer {tk}"}, timeout=25.0)
+    r.raise_for_status()
+    return r.json().get("results", []), hoje
+
+
+def contexto_ml(dias=7):
+    """Resumo das vendas do Mercado Livre; '' se não configurado/falhar."""
+    if not _ler().get("client_id"):
+        return ""
+    try:
+        import httpx
+        tk = token(httpx)
+        if not tk:
+            return ""
+        pedidos, hoje = coletar(httpx, tk, dias)
+    except Exception as exc:
+        print(f"[rayman] Mercado Livre indisponível: {exc}", file=sys.stderr)
+        try:
+            with open(os.path.join(RAYMAN_DIR, "erro.log"), "a") as f:
+                f.write(f"MERCADOLIVRE: {exc}\n---\n")
+        except Exception:
+            pass
+        return ""
+
+    linhas = [f"VENDAS REAIS DO MERCADO LIVRE (fonte oficial — últimos {dias} dias):"]
+    tot_p, tot_h, n_h = 0.0, 0.0, 0
+    pagos = [p for p in pedidos if p.get("status") in ("paid", "delivered",
+                                                       "shipped", "confirmed")]
+    for p in pagos:
+        total = float(p.get("total_amount") or 0)
+        tot_p += total
+        if str(p.get("date_created", ""))[:10] == str(hoje):
+            tot_h += total
+            n_h += 1
+    linhas.append(f"HOJE ({hoje}): {n_h} venda(s), R${tot_h:.2f}")
+    linhas.append(f"PERÍODO: {len(pagos)} venda(s) pagas, R${tot_p:.2f}"
+                  f" (de {len(pedidos)} pedidos no total)")
+    for p in pedidos[:8]:
+        itens = p.get("order_items") or []
+        titulo = (itens[0].get("item", {}).get("title", "?")[:45]
+                  if itens else "?")
+        linhas.append(f"- {str(p.get('date_created', ''))[:10]} | {titulo} | "
+                      f"R${float(p.get('total_amount') or 0):.2f} | "
+                      f"{p.get('status', '?')}")
+    return "\n".join(linhas)
+
+
+def testar():
+    import httpx
+    cred = _ler()
+    if not cred.get("client_id"):
+        print("1. credenciais: NÃO CONFIGURADAS")
+        print("   rode: rayman-ml --config APP_ID SECRET_KEY")
+        return
+    print("1. credenciais: ok")
+    if not cred.get("refresh_token") and not cred.get("access_token"):
+        print("2. autorização: FALTA — rode: rayman-ml --autorizar")
+        return
+    tk = token(httpx)
+    if not tk:
+        print("2. token: FALHOU — rode rayman-ml --autorizar de novo.")
+        return
+    print(f"2. token: ok (começa com {tk[:8]}...)")
+    try:
+        r = httpx.get(f"{API}/users/me",
+                      headers={"Authorization": f"Bearer {tk}"}, timeout=20.0)
+        print(f"3. conta: HTTP {r.status_code} — "
+              f"{r.json().get('nickname', '?')} (id {r.json().get('id', '?')})")
+        pedidos, _ = coletar(httpx, tk, 7)
+        print(f"4. pedidos (7 dias): {len(pedidos)} encontrados")
+    except Exception as exc:
+        print(f"3. consulta: ERRO {exc}")
+
+
+def perguntar(pergunta):
+    import re
+    ctx = contexto_ml()
+    if not ctx:
+        print("Mercado Livre não conectado. Rode: rayman-ml --testar")
+        sys.exit(1)
+    prompt = (ctx + "\n\nCom base SOMENTE nos dados acima, responda ao Julio "
+              "de forma direta e falada, com os números principais: " + pergunta)
+    out = subprocess.run([JARVIS, "--quiet", "ask", "--no-stream", prompt],
+                         capture_output=True, text=True, timeout=300)
+    resposta = re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "", out.stdout).strip()
+    print(resposta or out.stderr.strip()[-300:])
+    return resposta
+
+
+def main():
+    args = sys.argv[1:]
+    if args and args[0] in ("--help", "-h"):
+        print(__doc__)
+        return
+    if args and args[0] == "--config":
+        if len(args) < 3:
+            print("Uso: rayman-ml --config APP_ID SECRET_KEY")
+            sys.exit(1)
+        cred = _ler()
+        cred.update({"client_id": args[1], "client_secret": args[2]})
+        _gravar(cred)
+        print("App do Mercado Livre salvo. Agora rode: rayman-ml --autorizar")
+        return
+    if args and args[0] == "--autorizar":
+        autorizar()
+        return
+    if args and args[0] == "--codigo":
+        if len(args) < 2:
+            print('Uso: rayman-ml --codigo "URL_OU_CODIGO"')
+            sys.exit(1)
+        usar_codigo(" ".join(args[1:]))
+        return
+    if args and args[0] == "--testar":
+        testar()
+        return
+    if args:
+        perguntar(" ".join(args))
+    else:
+        perguntar("resuma minhas vendas de hoje e da semana no Mercado Livre")
+
+
+if __name__ == "__main__":
+    main()
+PYML
+
 # ---------- HUD (página) ----------
 cat > "$RAYMAN_DIR/hud.html" <<'HTMLHUD'
 <!DOCTYPE html>
@@ -2296,13 +2644,18 @@ cat > "$BIN_DIR/rayman-bling" <<WRAP
 [[ -f "$HOME/.openjarvis/rayman/anthropic_key.txt" ]] && export ANTHROPIC_API_KEY="\$(cat "$HOME/.openjarvis/rayman/anthropic_key.txt")"
 exec "$VENV/bin/python" "$RAYMAN_DIR/rayman_bling.py" "\$@"
 WRAP
+cat > "$BIN_DIR/rayman-ml" <<WRAP
+#!/usr/bin/env bash
+[[ -f "$HOME/.openjarvis/rayman/anthropic_key.txt" ]] && export ANTHROPIC_API_KEY="\$(cat "$HOME/.openjarvis/rayman/anthropic_key.txt")"
+exec "$VENV/bin/python" "$RAYMAN_DIR/rayman_ml.py" "\$@"
+WRAP
 cat > "$BIN_DIR/rayman-obsidian" <<WRAP
 #!/usr/bin/env bash
 [[ -f "$HOME/.openjarvis/rayman/anthropic_key.txt" ]] && export ANTHROPIC_API_KEY="\$(cat "$HOME/.openjarvis/rayman/anthropic_key.txt")"
 exec "$VENV/bin/python" "$RAYMAN_DIR/rayman_obsidian.py" "\$@"
 WRAP
 chmod +x "$BIN_DIR/rayman" "$BIN_DIR/rayman-voz" "$BIN_DIR/rayman-show" \
-         "$BIN_DIR/rayman-hud" "$BIN_DIR/rayman-obsidian" "$BIN_DIR/rayman-web" "$BIN_DIR/rayman-telegram" "$BIN_DIR/rayman-whatsapp" "$BIN_DIR/rayman-claude" "$BIN_DIR/rayman-vendas" "$BIN_DIR/rayman-conectar" "$BIN_DIR/rayman-bling"
+         "$BIN_DIR/rayman-hud" "$BIN_DIR/rayman-obsidian" "$BIN_DIR/rayman-web" "$BIN_DIR/rayman-telegram" "$BIN_DIR/rayman-whatsapp" "$BIN_DIR/rayman-claude" "$BIN_DIR/rayman-vendas" "$BIN_DIR/rayman-conectar" "$BIN_DIR/rayman-bling" "$BIN_DIR/rayman-ml"
 
 # ------------------------------------------------------------
 # 5b. Interface web em tempo real (rayman start)
@@ -2418,7 +2771,8 @@ echo "  rayman-web \"pergunta\"    -> busca na internet em tempo real"
 echo "  rayman-telegram           -> RAYMAN no Telegram (celular, PC, Apple Watch)"
 echo "  rayman-whatsapp           -> RAYMAN no WhatsApp via Twilio (de qualquer lugar)"
 echo "  rayman-claude CHAVE_API   -> liga o cérebro Claude (opcional, nuvem)"
-echo "  rayman-bling              -> vendas REAIS e estoque do Bling ERP"
+echo "  rayman-ml                 -> vendas REAIS do Mercado Livre (fonte oficial)"
+echo "  rayman-bling              -> vendas e estoque do Bling ERP (opcional)"
 echo "  rayman-vendas             -> seus dados do WeStack/Escritório (descobre as tabelas sozinho)"
 echo "  rayman-conectar           -> liga TUDO de uma vez (Claude, vendas, WhatsApp)"
 echo "  rayman start              -> chat web em tempo real (http://127.0.0.1:8000)"
