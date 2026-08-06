@@ -1183,6 +1183,34 @@ say_step "Procurando o seu vault do Obsidian"
     || echo "[aviso] Obsidian fica pra depois — configure com: rayman-obsidian /caminho/do/vault"
 
 # ------------------------------------------------------------
+# 5d. RAYMAN no Telegram como serviço (auto-início com o Mac)
+#     Só ativa se o token do bot já estiver salvo.
+# ------------------------------------------------------------
+if [[ -f "$RAYMAN_DIR/telegram_token.txt" ]]; then
+    say_step "Ativando o RAYMAN no Telegram como serviço (inicia com o Mac)"
+    PLIST="$HOME/Library/LaunchAgents/com.rayman.telegram.plist"
+    mkdir -p "$HOME/Library/LaunchAgents"
+    cat > "$PLIST" <<PLXML
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>com.rayman.telegram</string>
+  <key>ProgramArguments</key><array>
+    <string>$VENV/bin/python</string>
+    <string>$RAYMAN_DIR/rayman_telegram.py</string>
+  </array>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>StandardOutPath</key><string>$RAYMAN_DIR/telegram.log</string>
+  <key>StandardErrorPath</key><string>$RAYMAN_DIR/telegram.log</string>
+</dict></plist>
+PLXML
+    launchctl unload "$PLIST" 2>/dev/null || true
+    launchctl load "$PLIST" 2>/dev/null || true
+    echo "RAYMAN de plantão no Telegram (serviço com.rayman.telegram; log em $RAYMAN_DIR/telegram.log)."
+fi
+
+# ------------------------------------------------------------
 # 6. Validação
 # ------------------------------------------------------------
 say_step "Validando a instalação (jarvis doctor)"
