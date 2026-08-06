@@ -79,10 +79,10 @@ say_step "Instalando libs de voz (sounddevice, soundfile, kokoro, faster-whisper
 export PATH="$HOME/.local/bin:$HOME/.cargo/bin:$PATH"
 if command -v uv >/dev/null 2>&1; then
     uv pip install --quiet --python "$VENV/bin/python" \
-        sounddevice soundfile kokoro faster-whisper ddgs python-telegram-bot
+        sounddevice soundfile kokoro faster-whisper ddgs python-telegram-bot anthropic openai
 else
     "$VENV/bin/python" -m pip install --quiet --upgrade \
-        sounddevice soundfile kokoro faster-whisper ddgs python-telegram-bot
+        sounddevice soundfile kokoro faster-whisper ddgs python-telegram-bot anthropic openai
 fi
 
 # ------------------------------------------------------------
@@ -357,7 +357,38 @@ def perguntar(pergunta, historico):
     out = subprocess.run([JARVIS, "--quiet", "ask", "--no-stream", prefixo + pergunta],
                          capture_output=True, text=True, timeout=300)
     resposta = ANSI.sub("", out.stdout).strip()
-    return resposta or "Desculpe, senhor, não consegui gerar uma resposta."
+    if resposta:
+        return resposta
+    return diagnosticar(out.stderr or "")
+
+
+def diagnosticar(erro):
+    """Transforma o erro técnico escondido num aviso falado e útil."""
+    try:
+        import os
+        log = os.path.expanduser("~/.openjarvis/rayman/erro.log")
+        with open(log, "a") as f:
+            f.write(erro[-3000:] + "\n---\n")
+    except Exception:
+        pass
+    e = erro.lower()
+    if "no module named 'anthropic'" in e or "no module named \"anthropic\"" in e:
+        return ("Falta a biblioteca do Claude no meu ambiente, senhor. Rode no terminal: "
+                "uv pip install anthropic, e me chame de novo.")
+    if "authentication" in e or "invalid x-api-key" in e or "401" in e:
+        return ("Minha chave do Claude foi recusada, senhor. Confira a chave "
+                "com o comando rayman-conectar.")
+    if "credit" in e or "billing" in e or "429" in e:
+        return ("A conta do Claude está sem créditos ou no limite, senhor. "
+                "Confira em console ponto anthropic ponto com.")
+    if "connection refused" in e or "connect" in e and "11434" in e:
+        return ("O Ollama não está rodando, senhor. Abra o aplicativo do Ollama "
+                "ou rode ollama serve no terminal.")
+    if "not found" in e and ("model" in e or "pull" in e):
+        return ("O modelo configurado não está baixado, senhor. "
+                "Rode ollama pull com o nome do modelo.")
+    return ("Encontrei um erro interno, senhor. A mensagem completa está em "
+            "erro ponto log, na pasta do RAYMAN.")
 
 
 def main():
